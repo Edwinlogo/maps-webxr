@@ -4,9 +4,6 @@ export interface XRControllerCallbacks {
   onSelectRay: (raycaster: THREE.Raycaster, handedness: string) => void;
   onLeftStick: (x: number, y: number, dt: number) => void;
   onRightStick: (x: number, y: number, dt: number) => void;
-  onSnapTurn: (dir: -1 | 1) => void;
-  onWalkForward: () => void;
-  onButtonA: () => void;
   onButtonB: () => void;
   onButtonX: () => void;
   onRotateViewDrag: (deltaWorld: THREE.Vector3) => void;
@@ -35,7 +32,6 @@ interface ControllerSlot {
   inputSource: XRInputSource | null;
   isHand: boolean;
 
-  // Unified pinch / trigger state (supports bare hands + controllers!)
   selectActive: boolean;
   handPinchActive: boolean;
   squeezing: boolean;
@@ -45,13 +41,12 @@ interface ControllerSlot {
   isDraggingView: boolean;
   dragStartPos: THREE.Vector3;
   lastDragPos: THREE.Vector3;
-  selectStartMs: number;
   pinchWorldPos: THREE.Vector3;
 }
 
-const PINCH_START_DIST = 0.025; // 2.5 cm to initiate pinch
-const PINCH_END_DIST = 0.039;   // 3.9 cm hysteresis to release cleanly
-const DRAG_THRESHOLD_M = 0.018; // 1.8 cm hand movement switches from tap to rotate-drag
+const PINCH_START_DIST = 0.025;
+const PINCH_END_DIST = 0.039;
+const DRAG_THRESHOLD_M = 0.018;
 
 const VISIBLE_HAND_JOINTS = [
   'wrist',
@@ -108,11 +103,8 @@ export class XRControllerManager {
 
   private passthroughActive = false;
   private prevTwoHandDist: number | null = null;
-  private prevButtonA = false;
   private prevButtonB = false;
   private prevButtonX = false;
-  private snapCooldown = 0;
-  private walkCooldown = 0;
 
   private readonly raycaster = new THREE.Raycaster();
   private readonly tmpMatrix = new THREE.Matrix4();
@@ -160,7 +152,6 @@ export class XRControllerManager {
       const controllerMesh = buildQuestControllerMesh();
       gripSpace.add(controllerMesh);
 
-      // Minimalist Hand Tracking feedback (clean glowing fingertip indicators + pinch orb!)
       const handVisualGroup = new THREE.Group();
       const thumbRing = new THREE.Mesh(
         tipGeo,
@@ -223,7 +214,6 @@ export class XRControllerManager {
         isDraggingView: false,
         dragStartPos: new THREE.Vector3(),
         lastDragPos: new THREE.Vector3(),
-        selectStartMs: 0,
         pinchWorldPos: new THREE.Vector3(),
       };
 
@@ -252,16 +242,9 @@ export class XRControllerManager {
         for (const d of slot.jointDots.values()) d.visible = false;
       });
 
-      // Unified selectstart: handles both bare-hand pinch AND controller trigger!
-      raySpace.addEventListener('selectstart', () => {
-        this.beginPrimarySelect(slot);
-      });
+      raySpace.addEventListener('selectstart', () => this.beginPrimarySelect(slot));
+      raySpace.addEventListener('selectend', () => this.endPrimarySelect(slot));
 
-      raySpace.addEventListener('selectend', () => {
-        this.endPrimarySelect(slot);
-      });
-
-      // Controller Grip / Squeeze also supports panel grab + planet rotate + two-hand zoom
       raySpace.addEventListener('squeezestart', () => {
         slot.squeezing = true;
         this.buildRayFromSpace(slot.raySpace, this.raycaster);
@@ -295,7 +278,6 @@ export class XRControllerManager {
   private beginPrimarySelect(slot: ControllerSlot): void {
     if (slot.selectActive) return;
     slot.selectActive = true;
-    slot.selectStartMs = performance.now();
     slot.isDraggingView = false;
     this.pulseHaptic(slot, 0.3, 22);
 
@@ -338,7 +320,6 @@ export class XRControllerManager {
     slot.isDraggingView = false;
     this.prevTwoHandDist = null;
 
-    // Short pinch/trigger without dragging -> treat as clean Click/Tap!
     if (!wasDragging) {
       this.buildRayFromSpace(slot.raySpace, this.raycaster);
       this.callbacks.onSelectRay(this.raycaster, slot.handedness);
@@ -387,12 +368,6 @@ export class XRControllerManager {
     }
   }
 
-  public pulseAllHaptics(strength = 0.45, durationMs = 40): void {
-    for (const slot of this.slots) {
-      this.pulseHaptic(slot, strength, durationMs);
-    }
-  }
-
   private pulseHaptic(slot: ControllerSlot, strength: number, durationMs: number): void {
     try {
       const gp = slot.inputSource?.gamepad as
@@ -420,14 +395,13 @@ export class XRControllerManager {
     }
 
     const joints = (slot.handSpace as unknown as {
-      joints?: Record<string, THREE.Object3D & { jointRadius?: number }>;
+      joints?: Record<string, THREE.Object3D>;
     }).joints;
     if (!joints) return;
 
     const thumbTip = joints['thumb-tip'];
     const indexTip = joints['index-finger-tip'];
 
-    // In Space mode show sleek minimal constellation joints; in Passthrough show only clean fingertip indicators
     for (const [jName, dot] of slot.jointDots) {
       const jObj = joints[jName];
       if (!this.passthroughActive && jObj && jObj.visible) {
@@ -448,7 +422,6 @@ export class XRControllerManager {
       slot.indexRing.position.copy(this.tmpPosB);
       slot.pinchOrb.position.copy(slot.pinchWorldPos);
 
-      // Direct joint pinch detection with hysteresis (triggers even if OS delays selectstart!)
       if (!slot.handPinchActive && pinchDist < PINCH_START_DIST) {
         slot.handPinchActive = true;
         this.beginPrimarySelect(slot);
@@ -468,7 +441,7 @@ export class XRControllerManager {
     }
   }
 
-  public update(dt: number, isStreetView: boolean): void {
+  public update(dt: number): void {
     const session = this.renderer.xr.getSession();
     if (!session) {
       for (const s of this.slots) {
@@ -480,15 +453,10 @@ export class XRControllerManager {
       return;
     }
 
-    this.snapCooldown = Math.max(0, this.snapCooldown - dt);
-    this.walkCooldown = Math.max(0, this.walkCooldown - dt);
-
-    // 1) Update bare-hand joint visuals & pinch state
     for (const slot of this.slots) {
       this.updateHandJointsAndPinch(slot);
     }
 
-    // 2) Handle movable 3D Control Panel drag (works with bare-hand pinch OR controller trigger/grip!)
     for (const slot of this.slots) {
       if (slot.isDraggingPanel) {
         this.buildRayFromSpace(slot.raySpace, this.raycaster);
@@ -496,20 +464,16 @@ export class XRControllerManager {
           .copy(this.raycaster.ray.origin)
           .addScaledVector(this.raycaster.ray.direction, slot.panelGrabDistance);
         this.callbacks.onPanelDragMove(this.tmpTarget);
-        return; // Dedicated panel movement without spinning planet underneath
+        return;
       }
     }
 
-    // 3) Unified Hand + Controller Gesture Engine:
-    //    - Both hands pinching / squeezing -> Spread / Pinch-out Zoom!
-    //    - One hand pinching / squeezing + moving -> Rotate Planet or Rotate 360° Street View!
     const s0 = this.slots[0];
     const s1 = this.slots[1];
     const active0 = (s0.selectActive && !s0.isClickingPanel) || s0.squeezing;
     const active1 = (s1.selectActive && !s1.isClickingPanel) || s1.squeezing;
 
     if (active0 && active1) {
-      // Two-hand Spread / Pinch-out Zoom!
       s0.isDraggingView = true;
       s1.isDraggingView = true;
       this.getInteractionPoint(s0, this.tmpPosA);
@@ -517,7 +481,7 @@ export class XRControllerManager {
       const dist = this.tmpPosA.distanceTo(this.tmpPosB);
       if (this.prevTwoHandDist !== null && this.prevTwoHandDist > 0.04 && dist > 0.04) {
         const ratio = this.prevTwoHandDist / dist;
-        if (Math.abs(ratio - 1) > 0.0015 && !isStreetView) {
+        if (Math.abs(ratio - 1) > 0.0015) {
           this.callbacks.onTwoHandZoom(Math.pow(ratio, 1.35));
         }
       }
@@ -544,8 +508,6 @@ export class XRControllerManager {
       }
     }
 
-    // 4) Optional Touch Plus Controller thumbsticks & A/B/X/Y buttons (when controllers are used)
-    let buttonADown = false;
     let buttonBDown = false;
     let buttonXDown = false;
 
@@ -563,27 +525,16 @@ export class XRControllerManager {
 
       if (source.handedness === 'left') {
         if (ax !== 0 || ay !== 0) this.callbacks.onLeftStick(ax, ay, dt);
-        if (isStreetView && sy < -0.68 && this.walkCooldown <= 0) {
-          this.walkCooldown = 0.7;
-          this.callbacks.onWalkForward();
-        }
         if (gp.buttons[4]?.pressed) buttonXDown = true;
         if (gp.buttons[5]?.pressed) buttonBDown = true;
       } else if (source.handedness === 'right') {
         if (ax !== 0 || ay !== 0) this.callbacks.onRightStick(ax, ay, dt);
-        if (isStreetView && Math.abs(sx) > 0.68 && this.snapCooldown <= 0) {
-          this.snapCooldown = 0.34;
-          this.callbacks.onSnapTurn(sx > 0 ? 1 : -1);
-        }
-        if (gp.buttons[4]?.pressed) buttonADown = true;
         if (gp.buttons[5]?.pressed) buttonBDown = true;
       }
     }
 
-    if (buttonADown && !this.prevButtonA) this.callbacks.onButtonA();
     if (buttonBDown && !this.prevButtonB) this.callbacks.onButtonB();
     if (buttonXDown && !this.prevButtonX) this.callbacks.onButtonX();
-    this.prevButtonA = buttonADown;
     this.prevButtonB = buttonBDown;
     this.prevButtonX = buttonXDown;
   }

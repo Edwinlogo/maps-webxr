@@ -15,7 +15,6 @@ interface PendingTask {
   y: number;
   layer: MapLayer;
   useGoogle: boolean;
-  withSvOverlay: boolean;
   includeOverlays: boolean;
   priority: number;
   callbacks: Array<(tex: THREE.Texture | null) => void>;
@@ -79,10 +78,9 @@ export class TileManager {
     z: number,
     x: number,
     y: number,
-    useGoogle: boolean,
-    withSvOverlay: boolean
+    useGoogle: boolean
   ): string {
-    const providerTag = useGoogle ? (withSvOverlay ? 'gsv' : 'g') : 'o';
+    const providerTag = useGoogle ? 'g' : 'o';
     return `${providerTag}/${layer}/${z}/${x}/${y}`;
   }
 
@@ -91,10 +89,9 @@ export class TileManager {
     z: number,
     x: number,
     y: number,
-    useGoogle: boolean,
-    withSvOverlay: boolean
+    useGoogle: boolean
   ): THREE.Texture | null {
-    const key = this.getKey(layer, z, x, y, useGoogle, withSvOverlay);
+    const key = this.getKey(layer, z, x, y, useGoogle);
     const entry = this.cache.get(key);
     if (!entry) return null;
     entry.lastUsed = ++this.tick;
@@ -107,12 +104,11 @@ export class TileManager {
     x: number,
     y: number,
     useGoogle: boolean,
-    withSvOverlay: boolean,
     includeOverlays: boolean,
     priority: number,
     onLoaded: (tex: THREE.Texture | null) => void
   ): void {
-    const key = this.getKey(layer, z, x, y, useGoogle, withSvOverlay);
+    const key = this.getKey(layer, z, x, y, useGoogle);
     const cached = this.cache.get(key);
     if (cached) {
       cached.lastUsed = ++this.tick;
@@ -134,7 +130,6 @@ export class TileManager {
       y,
       layer,
       useGoogle,
-      withSvOverlay,
       includeOverlays,
       priority,
       callbacks: [onLoaded],
@@ -230,29 +225,8 @@ export class TileManager {
 
       if (task.useGoogle) {
         try {
-          if (task.withSvOverlay && task.z >= 7) {
-            const [baseImg, svImg] = await Promise.all([
-              loadImage(google2DTileUrl(task.layer, task.z, task.x, task.y)),
-              loadImage(google2DTileUrl('sv-overlay', task.z, task.x, task.y), 3500).catch(() => null),
-            ]);
-            const size = Math.max(256, baseImg.naturalWidth || 256);
-            const canvas = document.createElement('canvas');
-            canvas.width = size;
-            canvas.height = size;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              ctx.drawImage(baseImg, 0, 0, size, size);
-              if (svImg && svImg.naturalWidth > 2) {
-                ctx.globalAlpha = 0.88;
-                ctx.drawImage(svImg, 0, 0, size, size);
-                ctx.globalAlpha = 1.0;
-              }
-            }
-            texture = new THREE.CanvasTexture(canvas);
-          } else {
-            const img = await loadImage(google2DTileUrl(task.layer, task.z, task.x, task.y));
-            texture = new THREE.Texture(img);
-          }
+          const img = await loadImage(google2DTileUrl(task.layer, task.z, task.x, task.y));
+          texture = new THREE.Texture(img);
         } catch {
           texture = await this.fetchOpenTexture(
             task.layer,

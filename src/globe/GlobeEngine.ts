@@ -262,7 +262,6 @@ export class GlobeEngine {
   private targetState: GlobeState = { ...this.state };
   private layer: MapLayer = 'hybrid';
   private useGoogle = false;
-  private showSvOverlay = true;
   private is3DTiltEnabled = true;
   private flyAnim: FlyAnimation | null = null;
   private anchorUnit = new THREE.Vector3(0, 0, 1);
@@ -363,10 +362,6 @@ export class GlobeEngine {
     return this.useGoogle;
   }
 
-  public getStreetViewOverlay(): boolean {
-    return this.showSvOverlay;
-  }
-
   public isTilt3DEnabled(): boolean {
     return this.is3DTiltEnabled;
   }
@@ -388,14 +383,6 @@ export class GlobeEngine {
     if (this.useGoogle === enabled) return;
     this.useGoogle = enabled;
     this.reloadAllTiles(true);
-  }
-
-  public setStreetViewOverlay(enabled: boolean): void {
-    if (this.showSvOverlay === enabled) return;
-    this.showSvOverlay = enabled;
-    if (this.useGoogle) {
-      this.reloadAllTiles(false);
-    }
   }
 
   public setLayer(layer: MapLayer): void {
@@ -696,7 +683,7 @@ export class GlobeEngine {
     return THREE.MathUtils.clamp(Math.round(rawZ), 2, 18);
   }
 
-  private syncTiles(force: boolean): void {
+  private syncTiles(_force: boolean): void {
     const targetZ = this.computeDesiredZoom();
     const desiredKeys = new Set<string>();
 
@@ -707,14 +694,13 @@ export class GlobeEngine {
       includeOverlays: boolean
     ) => {
       const n = Math.pow(2, z);
-      const withSv = this.useGoogle && this.showSvOverlay && z >= 7 && includeOverlays;
 
       if (z === 2) {
         for (let y = 0; y < n; y++) {
           for (let x = 0; x < n; x++) {
-            const key = this.tileManager.getKey(this.layer, z, x, y, this.useGoogle, false);
+            const key = this.tileManager.getKey(this.layer, z, x, y, this.useGoogle);
             desiredKeys.add(key);
-            this.ensureTileMesh(z, x, y, false, includeOverlays, basePriority);
+            this.ensureTileMesh(z, x, y, includeOverlays, basePriority);
           }
         }
         return;
@@ -728,9 +714,9 @@ export class GlobeEngine {
           const tx = ((center.x + dx) % n + n) % n;
           const dist = Math.hypot(dx, dy);
           if (dist > halfSpan + 0.55) continue;
-          const key = this.tileManager.getKey(this.layer, z, tx, ty, this.useGoogle, withSv);
+          const key = this.tileManager.getKey(this.layer, z, tx, ty, this.useGoogle);
           desiredKeys.add(key);
-          this.ensureTileMesh(z, tx, ty, withSv, includeOverlays, basePriority + dist);
+          this.ensureTileMesh(z, tx, ty, includeOverlays, basePriority + dist);
         }
       }
     };
@@ -768,11 +754,10 @@ export class GlobeEngine {
     z: number,
     x: number,
     y: number,
-    withSvOverlay: boolean,
     includeOverlays: boolean,
     priority: number
   ): void {
-    const key = this.tileManager.getKey(this.layer, z, x, y, this.useGoogle, withSvOverlay);
+    const key = this.tileManager.getKey(this.layer, z, x, y, this.useGoogle);
     if (this.activeTiles.has(key)) return;
 
     const { geometry, centerUnit } = buildTileGeometry(z, x, y);
@@ -781,8 +766,7 @@ export class GlobeEngine {
       z,
       x,
       y,
-      this.useGoogle,
-      withSvOverlay
+      this.useGoogle
     );
 
     // All tile layers use transparent=true + depthWrite=false + renderOrder=z so Three.js
@@ -831,7 +815,6 @@ export class GlobeEngine {
         x,
         y,
         this.useGoogle,
-        withSvOverlay,
         includeOverlays,
         priority,
         (tex) => {

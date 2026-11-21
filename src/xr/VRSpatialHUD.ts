@@ -1,36 +1,32 @@
 import * as THREE from 'three';
-import type { AppMode, Landmark, MapLayer, PanoramaItem } from '../types';
-import { formatAltitude, formatCoords, formatDistance } from '../services/geo';
+import type { MapLayer } from '../types';
+import { formatAltitude, formatCoords } from '../services/geo';
 
 export interface VRHudState {
-  mode: AppMode;
-  googleActive: boolean;
-  passthrough: boolean;
-  streetPickMode: boolean;
   locationLabel: string;
   lat: number;
   lon: number;
   altitudeKm: number;
+  headingDeg: number;
+  tiltDeg: number;
+  tilt3DEnabled: boolean;
   layer: MapLayer;
-  nearbyPano: PanoramaItem | null;
-  searchingPano: boolean;
-  currentPano: PanoramaItem | null;
-  streetQuality: 'loading' | 'sd' | 'hd' | 'error';
-  statusMessage: string;
+  passthrough: boolean;
+  googleConfigured: boolean;
+  googleActive: boolean;
 }
 
 export interface VRHudCallbacks {
-  onToggleStreetView: () => void;
-  onTogglePassthrough: () => void;
-  onSelectLandmark: (landmark: Landmark) => void;
-  onSetLayer: (layer: MapLayer) => void;
-  onToggleStreetPick: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
+  onToggleTilt3D: () => void;
+  onAdjustTilt: (deltaDeg: number) => void;
+  onResetNorth: () => void;
   onResetGlobe: () => void;
-  onStepForward: () => void;
-  onTurnLeft: () => void;
-  onTurnRight: () => void;
+  onTogglePassthrough: () => void;
+  onSetLayer: (layer: MapLayer) => void;
+  onToggleGoogleMaps: () => void;
+  onExitXR: () => void;
 }
 
 interface HitRegion {
@@ -43,8 +39,8 @@ interface HitRegion {
 }
 
 const CANVAS_W = 960;
-const CANVAS_H = 580;
-const PANEL_W_M = 0.96;
+const CANVAS_H = 420;
+const PANEL_W_M = 0.88;
 const PANEL_H_M = (PANEL_W_M * CANVAS_H) / CANVAS_W;
 
 function createGrabHandleTexture(grabbed: boolean, hovered: boolean): THREE.CanvasTexture {
@@ -55,9 +51,9 @@ function createGrabHandleTexture(grabbed: boolean, hovered: boolean): THREE.Canv
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   ctx.fillStyle = grabbed
-    ? 'rgba(16, 185, 129, 0.92)'
+    ? 'rgba(16, 185, 129, 0.94)'
     : hovered
-      ? 'rgba(14, 165, 233, 0.9)'
+      ? 'rgba(14, 165, 233, 0.92)'
       : 'rgba(15, 23, 42, 0.88)';
   ctx.strokeStyle = grabbed ? '#6ee7b7' : hovered ? '#7dd3fc' : 'rgba(125, 211, 252, 0.55)';
   ctx.lineWidth = 3;
@@ -100,30 +96,25 @@ export class VRSpatialHUD {
   private hoveredRegionId: string | null = null;
   private isGrabbed = false;
   private isGrabHovered = false;
-  private landmarks: Landmark[];
+  private settingsOpen = false;
   private callbacks: VRHudCallbacks;
-  private pageIndex = 0;
   private lastDrawHash = '';
   private state: VRHudState;
 
-  constructor(landmarks: Landmark[], callbacks: VRHudCallbacks) {
-    this.landmarks = landmarks;
+  constructor(callbacks: VRHudCallbacks) {
     this.callbacks = callbacks;
     this.state = {
-      mode: 'globe',
-      googleActive: false,
-      passthrough: false,
-      streetPickMode: false,
       locationLabel: 'Planeta Tierra',
       lat: 16,
       lon: -52,
       altitudeKm: 13800,
+      headingDeg: 0,
+      tiltDeg: 0,
+      tilt3DEnabled: true,
       layer: 'hybrid',
-      nearbyPano: null,
-      searchingPano: false,
-      currentPano: null,
-      streetQuality: 'loading',
-      statusMessage: 'Pellizca y mueve para girar · 2 manos para zoom',
+      passthrough: false,
+      googleConfigured: false,
+      googleActive: false,
     };
 
     this.canvas = document.createElement('canvas');
@@ -147,35 +138,33 @@ export class VRSpatialHUD {
     this.panelMesh.renderOrder = 40;
     this.group.add(this.panelMesh);
 
-    // Top movable handle bar (grab with hand pinch or controller trigger/grip to reposition anywhere!)
     this.grabTexIdle = createGrabHandleTexture(false, false);
     this.grabTexHover = createGrabHandleTexture(false, true);
     this.grabTexActive = createGrabHandleTexture(true, true);
 
-    const grabGeo = new THREE.PlaneGeometry(0.58, 0.082);
+    const grabGeo = new THREE.PlaneGeometry(0.54, 0.076);
     this.grabBarMat = new THREE.MeshBasicMaterial({
       map: this.grabTexIdle,
       transparent: true,
       side: THREE.FrontSide,
     });
     this.grabBarMesh = new THREE.Mesh(grabGeo, this.grabBarMat);
-    this.grabBarMesh.position.set(0, PANEL_H_M / 2 + 0.052, 0.004);
+    this.grabBarMesh.position.set(0, PANEL_H_M / 2 + 0.048, 0.004);
     this.grabBarMesh.renderOrder = 42;
     this.group.add(this.grabBarMesh);
 
-    // Subtle sleek bottom pill bar (VisionOS-style!) also draggable to move the console
-    const bottomGeo = new THREE.PlaneGeometry(0.32, 0.036);
+    const bottomGeo = new THREE.PlaneGeometry(0.3, 0.032);
     this.bottomGrabMat = new THREE.MeshBasicMaterial({
       color: 0x94a3b8,
       transparent: true,
       opacity: 0.72,
     });
     this.bottomGrabMesh = new THREE.Mesh(bottomGeo, this.bottomGrabMat);
-    this.bottomGrabMesh.position.set(0, -(PANEL_H_M / 2 + 0.034), 0.004);
+    this.bottomGrabMesh.position.set(0, -(PANEL_H_M / 2 + 0.03), 0.004);
     this.bottomGrabMesh.renderOrder = 42;
     this.group.add(this.bottomGrabMesh);
 
-    this.group.position.set(0, 0.84, -1.12);
+    this.group.position.set(0, 0.82, -1.08);
     this.group.rotation.set(-0.34, 0, 0);
     this.group.visible = false;
 
@@ -203,9 +192,9 @@ export class VRSpatialHUD {
     }
 
     this.group.position.set(
-      camPos.x + camDir.x * 1.05,
-      Math.max(0.68, camPos.y - 0.44),
-      camPos.z + camDir.z * 1.05
+      camPos.x + camDir.x * 1.0,
+      Math.max(0.66, camPos.y - 0.44),
+      camPos.z + camDir.z * 1.0
     );
     this.group.lookAt(camPos.x, camPos.y - 0.08, camPos.z);
     this.group.visible = true;
@@ -235,9 +224,8 @@ export class VRSpatialHUD {
   public moveToWorldPosition(targetPos: THREE.Vector3, camera: THREE.Camera): void {
     const camPos = new THREE.Vector3();
     camera.getWorldPosition(camPos);
-    // Keep panel smoothly within comfortable reach (0.45m .. 2.8m)
     const offset = targetPos.clone().sub(camPos);
-    const dist = THREE.MathUtils.clamp(offset.length(), 0.48, 2.6);
+    const dist = THREE.MathUtils.clamp(offset.length(), 0.45, 2.6);
     if (offset.lengthSq() > 0.0001) {
       offset.normalize().multiplyScalar(dist);
     }
@@ -251,7 +239,9 @@ export class VRSpatialHUD {
     this.redraw(false);
   }
 
-  public testHover(raycaster: THREE.Raycaster): { point: THREE.Vector3; regionId: string | null; isGrab: boolean } | null {
+  public testHover(
+    raycaster: THREE.Raycaster
+  ): { point: THREE.Vector3; regionId: string | null; isGrab: boolean } | null {
     if (!this.group.visible) return null;
 
     const grabHit = this.hitTestGrabHandle(raycaster);
@@ -325,9 +315,8 @@ export class VRSpatialHUD {
     label: string,
     options: {
       sublabel?: string;
-      primary?: boolean;
       active?: boolean;
-      accent?: 'cyan' | 'emerald' | 'amber' | 'violet' | 'slate';
+      accent?: 'cyan' | 'emerald' | 'violet' | 'rose' | 'slate';
       fontSize?: number;
       action: () => void;
     }
@@ -337,32 +326,32 @@ export class VRSpatialHUD {
     const hovered = this.hoveredRegionId === id;
     const accent = options.accent ?? 'slate';
 
-    let fill = 'rgba(20, 32, 56, 0.84)';
-    let stroke = 'rgba(148, 163, 184, 0.35)';
-    let textColor = '#e2e8f0';
+    let fill = 'rgba(20, 32, 56, 0.86)';
+    let stroke = 'rgba(148, 163, 184, 0.36)';
+    let textColor = '#f1f5f9';
 
     if (accent === 'emerald') {
       fill = hovered ? 'rgba(16, 185, 129, 0.96)' : 'rgba(5, 150, 105, 0.9)';
       stroke = '#6ee7b7';
       textColor = '#ffffff';
     } else if (accent === 'cyan') {
-      fill = hovered ? 'rgba(14, 165, 233, 0.96)' : 'rgba(2, 132, 199, 0.86)';
+      fill = hovered ? 'rgba(14, 165, 233, 0.96)' : 'rgba(2, 132, 199, 0.88)';
       stroke = '#7dd3fc';
       textColor = '#ffffff';
-    } else if (accent === 'amber') {
-      fill = hovered ? 'rgba(245, 158, 11, 0.96)' : 'rgba(217, 119, 6, 0.88)';
-      stroke = '#fde68a';
-      textColor = '#ffffff';
     } else if (accent === 'violet') {
-      fill = hovered ? 'rgba(139, 92, 246, 0.94)' : 'rgba(109, 40, 217, 0.85)';
+      fill = hovered ? 'rgba(139, 92, 246, 0.96)' : 'rgba(109, 40, 217, 0.88)';
       stroke = '#c4b5fd';
       textColor = '#ffffff';
+    } else if (accent === 'rose') {
+      fill = hovered ? 'rgba(225, 29, 72, 0.92)' : 'rgba(159, 18, 57, 0.8)';
+      stroke = '#fda4af';
+      textColor = '#ffffff';
     } else if (options.active) {
-      fill = 'rgba(14, 116, 144, 0.88)';
+      fill = 'rgba(14, 116, 144, 0.9)';
       stroke = '#38bdf8';
       textColor = '#ffffff';
     } else if (hovered) {
-      fill = 'rgba(30, 58, 102, 0.94)';
+      fill = 'rgba(30, 58, 102, 0.95)';
       stroke = '#38bdf8';
       textColor = '#ffffff';
     }
@@ -370,47 +359,101 @@ export class VRSpatialHUD {
     ctx.save();
     ctx.fillStyle = fill;
     ctx.strokeStyle = stroke;
-    ctx.lineWidth = hovered || options.primary ? 3 : 1.8;
+    ctx.lineWidth = hovered || options.active ? 3 : 1.8;
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 16);
+    ctx.roundRect(x, y, w, h, 18);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = textColor;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `${options.primary ? '700' : '600'} ${options.fontSize ?? 20}px system-ui, -apple-system, sans-serif`;
+    ctx.font = `700 ${options.fontSize ?? 22}px system-ui, -apple-system, sans-serif`;
 
     if (options.sublabel) {
-      ctx.fillText(label, x + w / 2, y + h / 2 - 10, w - 16);
-      ctx.font = '500 14px system-ui, sans-serif';
+      ctx.fillText(label, x + w / 2, y + h / 2 - 12, w - 18);
+      ctx.font = '500 15px system-ui, sans-serif';
       ctx.fillStyle = 'rgba(226, 232, 240, 0.86)';
-      ctx.fillText(options.sublabel, x + w / 2, y + h / 2 + 13, w - 16);
+      ctx.fillText(options.sublabel, x + w / 2, y + h / 2 + 15, w - 18);
     } else {
-      ctx.fillText(label, x + w / 2, y + h / 2 + 1, w - 16);
+      ctx.fillText(label, x + w / 2, y + h / 2 + 1, w - 18);
     }
+    ctx.restore();
+  }
+
+  private drawCompassButton(x: number, y: number, w: number, h: number, headingDeg: number): void {
+    const id = 'compass_north';
+    this.regions.push({ id, x, y, w, h, action: () => this.callbacks.onResetNorth() });
+    const ctx = this.ctx;
+    const hovered = this.hoveredRegionId === id;
+    const normDeg = ((Math.round(headingDeg) % 360) + 360) % 360;
+
+    ctx.save();
+    ctx.fillStyle = hovered ? 'rgba(30, 58, 102, 0.95)' : 'rgba(20, 32, 56, 0.86)';
+    ctx.strokeStyle = hovered ? '#38bdf8' : 'rgba(148, 163, 184, 0.36)';
+    ctx.lineWidth = hovered ? 3 : 1.8;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 18);
+    ctx.fill();
+    ctx.stroke();
+
+    // Mini rotating compass needle
+    const cx = x + w / 2;
+    const cy = y + 36;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate((headingDeg * Math.PI) / 180);
+
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 22, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Red North arrow
+    ctx.fillStyle = '#f43f5e';
+    ctx.beginPath();
+    ctx.moveTo(0, -18);
+    ctx.lineTo(6, 2);
+    ctx.lineTo(-6, 2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Slate South arrow
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath();
+    ctx.moveTo(0, 18);
+    ctx.lineTo(5, 2);
+    ctx.lineTo(-5, 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '700 17px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`Brújula · ${normDeg}°`, cx, y + h - 22);
     ctx.restore();
   }
 
   private redraw(force: boolean): void {
     const s = this.state;
+    const normHeading = ((Math.round(s.headingDeg) % 360) + 360) % 360;
     const hash = [
-      s.mode,
-      s.googleActive ? 'g1' : 'g0',
-      s.passthrough ? 'pt1' : 'pt0',
-      s.streetPickMode ? 'pk1' : 'pk0',
+      this.settingsOpen ? 'cfg' : 'main',
       s.locationLabel,
       s.lat.toFixed(2),
       s.lon.toFixed(2),
       formatAltitude(s.altitudeKm),
+      normHeading,
+      Math.round(s.tiltDeg),
+      s.tilt3DEnabled ? '3d' : '2d',
       s.layer,
-      s.nearbyPano?.id ?? '',
-      s.searchingPano ? '1' : '0',
-      s.currentPano?.id ?? '',
-      s.streetQuality,
-      s.statusMessage,
+      s.passthrough ? 'pt' : 'sp',
+      s.googleConfigured ? 'gc1' : 'gc0',
+      s.googleActive ? 'ga1' : 'ga0',
       this.hoveredRegionId ?? '',
-      this.pageIndex,
     ].join('|');
 
     if (!force && hash === this.lastDrawHash) return;
@@ -420,200 +463,230 @@ export class VRSpatialHUD {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
-    // Minimalist frosted glass backdrop
+    // Frosted glass frame
     const bgGrad = ctx.createLinearGradient(0, 0, CANVAS_W, CANVAS_H);
-    bgGrad.addColorStop(0, 'rgba(6, 12, 26, 0.90)');
-    bgGrad.addColorStop(1, 'rgba(11, 20, 40, 0.90)');
+    bgGrad.addColorStop(0, 'rgba(6, 12, 26, 0.92)');
+    bgGrad.addColorStop(1, 'rgba(11, 20, 40, 0.92)');
     ctx.fillStyle = bgGrad;
-    ctx.strokeStyle = 'rgba(125, 211, 252, 0.36)';
+    ctx.strokeStyle = 'rgba(125, 211, 252, 0.38)';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.roundRect(8, 8, CANVAS_W - 16, CANVAS_H - 16, 28);
     ctx.fill();
     ctx.stroke();
 
-    // Compact Header: Location + Coords + Passthrough Toggle
-    const isSV = s.mode === 'streetview';
+    if (this.settingsOpen) {
+      this.drawSettingsView();
+    } else {
+      this.drawMainView();
+    }
+
+    this.texture.needsUpdate = true;
+  }
+
+  private drawMainView(): void {
+    const s = this.state;
+    const ctx = this.ctx;
+
+    // Top telemetry header
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#f8fafc';
-    ctx.font = '700 25px system-ui, sans-serif';
-    ctx.fillText(s.locationLabel, 34, 48, 560);
+    ctx.font = '700 26px system-ui, sans-serif';
+    ctx.fillText(s.locationLabel, 34, 46, 560);
 
     ctx.fillStyle = '#94a3b8';
-    ctx.font = '500 16px ui-monospace, monospace';
-    const metaRight = isSV ? 'Nivel calle 360°' : `Altitud ${formatAltitude(s.altitudeKm)}`;
-    ctx.fillText(`${formatCoords(s.lat, s.lon)}  ·  ${metaRight}`, 34, 78, 560);
+    ctx.font = '500 17px ui-monospace, monospace';
+    ctx.fillText(
+      `${formatCoords(s.lat, s.lon)}   ·   Altitud ${formatAltitude(s.altitudeKm)}`,
+      34,
+      78,
+      620
+    );
 
-    // Passthrough / Stars live toggle right in top-right of movable console!
+    // Exit XR button top right
+    this.drawButton('exit_xr', CANVAS_W - 186, 28, 154, 54, '✕  Salir XR', {
+      accent: 'rose',
+      fontSize: 18,
+      action: () => this.callbacks.onExitXR(),
+    });
+
+    // Row 1: All 2D navigation controls (Zoom +, Zoom -, 3D/2D Tilt, Compass N, Full Globe)
+    const r1Y = 112;
+    const r1H = 104;
+    const gap = 14;
+    const w5 = (CANVAS_W - 68 - gap * 4) / 5;
+
+    this.drawButton('zoom_in', 34, r1Y, w5, r1H, '+', {
+      sublabel: 'Acercar',
+      fontSize: 34,
+      action: () => this.callbacks.onZoomIn(),
+    });
+    this.drawButton('zoom_out', 34 + (w5 + gap), r1Y, w5, r1H, '−', {
+      sublabel: 'Alejar',
+      fontSize: 34,
+      action: () => this.callbacks.onZoomOut(),
+    });
     this.drawButton(
-      'toggle_passthrough',
-      CANVAS_W - 310,
-      26,
-      276,
-      62,
-      s.passthrough ? '👁 REALIDAD · PASSTHROUGH' : '✦ ESPACIO · ESTRELLAS',
+      'tilt_3d',
+      34 + (w5 + gap) * 2,
+      r1Y,
+      w5,
+      r1H,
+      s.tilt3DEnabled ? '3D' : '2D',
       {
-        sublabel: s.passthrough ? 'Toca para fondo estelar' : 'Toca para ver tu entorno',
-        accent: s.passthrough ? 'violet' : 'slate',
-        fontSize: 17,
+        sublabel: s.tilt3DEnabled ? `Inclinado ${Math.round(s.tiltDeg)}°` : 'Vista vertical',
+        active: s.tilt3DEnabled,
+        fontSize: 28,
+        action: () => this.callbacks.onToggleTilt3D(),
+      }
+    );
+    this.drawCompassButton(34 + (w5 + gap) * 3, r1Y, w5, r1H, s.headingDeg);
+    this.drawButton('reset_globe', 34 + (w5 + gap) * 4, r1Y, w5, r1H, '🌍', {
+      sublabel: 'Planeta',
+      fontSize: 30,
+      action: () => this.callbacks.onResetGlobe(),
+    });
+
+    // Row 2: Cambiar fondo (Estrellas ↔ Realidad Passthrough) + Configuración
+    const r2Y = 236;
+    const r2H = 104;
+    const halfW = (CANVAS_W - 68 - gap) / 2;
+
+    this.drawButton(
+      'toggle_bg',
+      34,
+      r2Y,
+      halfW,
+      r2H,
+      s.passthrough ? '👁  FONDO: REALIDAD (PASSTHROUGH)' : '✦  FONDO: ESPACIO (ESTRELLAS)',
+      {
+        sublabel: s.passthrough ? 'Toca para cambiar a estrellas' : 'Toca para ver tu entorno real',
+        accent: s.passthrough ? 'violet' : 'cyan',
+        fontSize: 19,
         action: () => this.callbacks.onTogglePassthrough(),
       }
     );
 
-    // Primary Vista 360° / Return Row
-    if (isSV) {
-      const qual =
-        s.streetQuality === 'hd' ? 'HD' : s.streetQuality === 'sd' ? 'Mejorando HD...' : 'Cargando...';
-      const provLabel =
-        s.currentPano?.provider === 'google'
-          ? s.currentPano.copyright || 'Google Street View'
-          : s.currentPano?.provider === 'mapillary'
-            ? 'Mapillary · Vista 360°'
-            : 'Panoramax · Vista 360°';
-      this.drawButton('primary_cta', 34, 112, 460, 82, 'VOLVER AL PLANETA 3D', {
-        sublabel: `${provLabel} · ${qual}`,
-        primary: true,
-        accent: 'amber',
-        fontSize: 22,
-        action: () => this.callbacks.onToggleStreetView(),
-      });
-      this.drawButton('sv_walk', 510, 112, 190, 82, 'AVANZAR', {
-        sublabel: 'Siguiente 360°',
-        accent: 'cyan',
-        fontSize: 20,
-        action: () => this.callbacks.onStepForward(),
-      });
-      this.drawButton('sv_left', 716, 112, 100, 82, '↺ -30°', {
-        fontSize: 20,
-        action: () => this.callbacks.onTurnLeft(),
-      });
-      this.drawButton('sv_right', 826, 112, 100, 82, '↻ +30°', {
-        fontSize: 20,
-        action: () => this.callbacks.onTurnRight(),
-      });
-    } else {
-      const hasNearby = Boolean(s.nearbyPano);
-      const isGooglePano = s.nearbyPano?.provider === 'google';
-      this.drawButton(
-        'primary_cta',
-        34,
-        112,
-        526,
-        82,
-        hasNearby
-          ? isGooglePano
-            ? 'ENTRAR A GOOGLE STREET VIEW'
-            : 'ENTRAR EN VISTA 360°'
-          : 'EXPLORAR VISTA 360° AQUÍ',
-        {
-          sublabel: s.searchingPano
-            ? 'Buscando panoramas 360° cercanos...'
-            : s.nearbyPano
-              ? `Panorama a ${formatDistance(s.nearbyPano.distanceMeters)} · Toca o pulsa A`
-              : s.statusMessage,
-          primary: true,
-          accent: hasNearby ? 'emerald' : 'cyan',
-          fontSize: 22,
-          action: () => this.callbacks.onToggleStreetView(),
-        }
-      );
-
-      this.drawButton('zoom_in', 576, 112, 108, 82, '+', {
-        sublabel: 'Acercar',
-        fontSize: 28,
-        action: () => this.callbacks.onZoomIn(),
-      });
-      this.drawButton('zoom_out', 696, 112, 108, 82, '−', {
-        sublabel: 'Alejar',
-        fontSize: 28,
-        action: () => this.callbacks.onZoomOut(),
-      });
-      this.drawButton('reset_globe', 816, 112, 110, 82, 'GLOBO', {
-        sublabel: 'Órbita',
-        fontSize: 18,
-        action: () => this.callbacks.onResetGlobe(),
-      });
-    }
-
-    // Minimalist Layer + Street Pick + Destinations Pager row
-    this.drawButton('layer_hybrid', 34, 214, 154, 46, 'Híbrido', {
-      active: s.layer === 'hybrid',
-      fontSize: 17,
-      action: () => this.callbacks.onSetLayer('hybrid'),
-    });
-    this.drawButton('layer_sat', 200, 214, 150, 46, 'Satélite', {
-      active: s.layer === 'satellite',
-      fontSize: 17,
-      action: () => this.callbacks.onSetLayer('satellite'),
-    });
-    this.drawButton('layer_streets', 362, 214, 146, 46, 'Calles', {
-      active: s.layer === 'streets',
-      fontSize: 17,
-      action: () => this.callbacks.onSetLayer('streets'),
-    });
-    this.drawButton(
-      'toggle_sv_pick',
-      524,
-      214,
-      250,
-      46,
-      s.streetPickMode ? '📍 Clic Calle → 360°: ON' : '📍 Clic Calle → 360°',
-      {
-        accent: s.streetPickMode ? 'emerald' : 'slate',
-        fontSize: 17,
-        action: () => this.callbacks.onToggleStreetPick(),
-      }
-    );
-
-    const perPage = 6;
-    const totalPages = Math.max(1, Math.ceil(this.landmarks.length / perPage));
-    this.drawButton('page_prev', 794, 214, 60, 46, '◀', {
-      fontSize: 19,
+    const layerName = s.layer === 'hybrid' ? 'Híbrido' : s.layer === 'satellite' ? 'Satélite' : 'Calles';
+    const srcName = s.googleActive ? 'Google Map Tiles' : 'Satélite HD';
+    this.drawButton('open_settings', 34 + halfW + gap, r2Y, halfW, r2H, '⚙  CONFIGURACIÓN', {
+      sublabel: `${layerName} · ${srcName} · Inclinación`,
+      fontSize: 21,
       action: () => {
-        this.pageIndex = (this.pageIndex - 1 + totalPages) % totalPages;
-        this.redraw(true);
-      },
-    });
-    this.drawButton('page_next', 866, 214, 60, 46, '▶', {
-      fontSize: 19,
-      action: () => {
-        this.pageIndex = (this.pageIndex + 1) % totalPages;
+        this.settingsOpen = true;
         this.redraw(true);
       },
     });
 
-    // Clean 3x2 Destination Grid
-    const start = this.pageIndex * perPage;
-    const slice = this.landmarks.slice(start, start + perPage);
-    const cols = 3;
-    const gap = 14;
-    const btnW = (CANVAS_W - 68 - gap * (cols - 1)) / cols;
-    const btnH = 104;
-
-    slice.forEach((lm, idx) => {
-      const col = idx % cols;
-      const row = Math.floor(idx / cols);
-      const bx = 34 + col * (btnW + gap);
-      const by = 282 + row * (btnH + gap);
-      this.drawButton(`lm_${lm.id}`, bx, by, btnW, btnH, lm.city, {
-        sublabel: `${lm.name} · ${lm.country}`,
-        fontSize: 22,
-        action: () => this.callbacks.onSelectLandmark(lm),
-      });
-    });
-
-    // Minimal gesture guide footer
+    // Gesture hint footer
     ctx.fillStyle = '#94a3b8';
     ctx.font = '500 15px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(
-      'Manos sin controles:  Pellizca + Mueve = Rotar vista   ·   Abrir/Cerrar 2 manos = Zoom   ·   Barra superior = Mover tablero',
+      'Pellizcar + mover: Rotar planeta   ·   Abrir/cerrar 2 manos: Zoom   ·   Barra superior ⠿: Mover tablero',
       CANVAS_W / 2,
-      CANVAS_H - 32
+      CANVAS_H - 30
+    );
+  }
+
+  private drawSettingsView(): void {
+    const s = this.state;
+    const ctx = this.ctx;
+
+    // Header + Back button
+    this.drawButton('cfg_back', 34, 28, 168, 52, '←  Volver', {
+      accent: 'cyan',
+      fontSize: 19,
+      action: () => {
+        this.settingsOpen = false;
+        this.redraw(true);
+      },
+    });
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '700 25px system-ui, sans-serif';
+    ctx.fillText('⚙  Configuración', 224, 54);
+
+    // Section 1: Map Layers
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '600 16px system-ui, sans-serif';
+    ctx.fillText('CAPA DEL MAPA', 38, 108);
+
+    const gap = 14;
+    const layerW = (CANVAS_W - 68 - gap * 2) / 3;
+    this.drawButton('layer_hybrid', 34, 124, layerW, 64, 'Híbrido (Satélite + Calles)', {
+      active: s.layer === 'hybrid',
+      fontSize: 18,
+      action: () => this.callbacks.onSetLayer('hybrid'),
+    });
+    this.drawButton('layer_sat', 34 + layerW + gap, 124, layerW, 64, 'Satélite Puro', {
+      active: s.layer === 'satellite',
+      fontSize: 18,
+      action: () => this.callbacks.onSetLayer('satellite'),
+    });
+    this.drawButton('layer_streets', 34 + (layerW + gap) * 2, 124, layerW, 64, 'Mapa Callejero', {
+      active: s.layer === 'streets',
+      fontSize: 18,
+      action: () => this.callbacks.onSetLayer('streets'),
+    });
+
+    // Section 2: Fondo + Tilt fine control + Google Map Tiles toggle
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '600 16px system-ui, sans-serif';
+    ctx.fillText('FONDO, CÁMARA Y PROVEEDOR', 38, 214);
+
+    this.drawButton(
+      'cfg_bg',
+      34,
+      230,
+      300,
+      86,
+      s.passthrough ? '👁 Realidad · Passthrough' : '✦ Espacio · Estrellas',
+      {
+        sublabel: 'Cambiar fondo',
+        accent: s.passthrough ? 'violet' : 'slate',
+        fontSize: 18,
+        action: () => this.callbacks.onTogglePassthrough(),
+      }
     );
 
-    this.texture.needsUpdate = true;
+    this.drawButton('cfg_tilt_up', 348, 230, 134, 86, 'Inclinar ▲', {
+      sublabel: `${Math.round(s.tiltDeg)}°`,
+      fontSize: 18,
+      action: () => this.callbacks.onAdjustTilt(10),
+    });
+    this.drawButton('cfg_tilt_down', 494, 230, 134, 86, 'Inclinar ▼', {
+      sublabel: 'Vertical',
+      fontSize: 18,
+      action: () => this.callbacks.onAdjustTilt(-10),
+    });
+
+    const gLabel = s.googleActive
+      ? 'Google Map Tiles: ON'
+      : s.googleConfigured
+        ? 'Google Map Tiles: OFF'
+        : 'Satélite HD (Por defecto)';
+    const gSub = s.googleConfigured
+      ? 'Toca para alternar proveedor'
+      : 'Configura API Key en la web 2D';
+    this.drawButton('cfg_google', 642, 230, 284, 86, gLabel, {
+      sublabel: gSub,
+      accent: s.googleActive ? 'emerald' : 'slate',
+      fontSize: 17,
+      action: () => this.callbacks.onToggleGoogleMaps(),
+    });
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '500 15px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(
+      'Nota: Las búsquedas usan OpenStreetMap gratis (nunca Geocoding API)  ·  Pellizca barra ⠿ para mover este panel',
+      CANVAS_W / 2,
+      CANVAS_H - 36
+    );
   }
 
   public dispose(): void {
