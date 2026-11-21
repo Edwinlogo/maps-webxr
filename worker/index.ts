@@ -3,26 +3,49 @@ interface Env {
     fetch(request: Request): Promise<Response>;
   };
   STATIC_ORIGIN?: string;
+  GOOGLE_MAPS_API_KEY?: string;
 }
 
-const DEFAULT_STATIC_ORIGIN =
-  'https://raw.githubusercontent.com/Edwinlogo/maps-webxr/gh-pages';
+type GoogleSessionType = 'hybrid' | 'satellite' | 'streets' | 'sv-overlay' | 'streetview';
 
-const STATIC_MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.json': 'application/json; charset=utf-8',
-  '.ico': 'image/x-icon',
-};
+interface CachedGoogleSession {
+  token: string;
+  expiresAtMs: number;
+}
 
-function mimeForPath(pathname: string): string {
-  const idx = pathname.lastIndexOf('.');
-  if (idx === -1) return 'text/html; charset=utf-8';
-  return STATIC_MIME[pathname.slice(idx).toLowerCase()] ?? 'application/octet-stream';
+interface RawGoogleSvLink {
+  panoId?: string;
+  heading?: number;
+  text?: string;
+}
+
+interface RawGoogleSvMetadata {
+  panoId?: string;
+  lat?: number;
+  lng?: number;
+  originalLat?: number;
+  originalLng?: number;
+  imageWidth?: number;
+  imageHeight?: number;
+  tileWidth?: number;
+  tileHeight?: number;
+  heading?: number;
+  tilt?: number;
+  roll?: number;
+  date?: string;
+  copyright?: string;
+  imageryType?: string;
+  links?: RawGoogleSvLink[];
+  addressComponents?: Array<{
+    longName?: string;
+    shortName?: string;
+    types?: string[];
+  }>;
+  error?: {
+    code?: number;
+    message?: string;
+    status?: string;
+  };
 }
 
 interface RawPanoramaxLink {
@@ -46,9 +69,6 @@ interface RawPanoramaxFeature {
     datetime?: string;
     'view:azimuth'?: number;
     license?: string;
-    'pers:interior_orientation'?: {
-      field_of_view?: number;
-    };
   };
   assets?: {
     hd?: { href?: string };
@@ -57,6 +77,20 @@ interface RawPanoramaxFeature {
   };
   links?: RawPanoramaxLink[];
 }
+
+const DEFAULT_STATIC_ORIGIN =
+  'https://raw.githubusercontent.com/Edwinlogo/maps-webxr/gh-pages';
+
+const STATIC_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.json': 'application/json; charset=utf-8',
+  '.ico': 'image/x-icon',
+};
 
 const EARTH_RADIUS_M = 6371008.8;
 const DEG2RAD = Math.PI / 180;
@@ -81,6 +115,12 @@ const ALLOWED_IMAGE_HOST_PATTERNS: RegExp[] = [
   /(^|\.)panoramax-storage[a-z0-9.-]*$/i,
   /(^|\.)s3\.[a-z0-9.-]+\.amazonaws\.com$/i,
 ];
+
+function mimeForPath(pathname: string): string {
+  const idx = pathname.lastIndexOf('.');
+  if (idx === -1) return 'text/html; charset=utf-8';
+  return STATIC_MIME[pathname.slice(idx).toLowerCase()] ?? 'application/octet-stream';
+}
 
 function isAllowedImageHost(hostname: string): boolean {
   const lower = hostname.toLowerCase();
@@ -111,6 +151,406 @@ function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): num
   const y = Math.sin(dLam) * Math.cos(phi2);
   const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLam);
   return ((Math.atan2(y, x) * RAD2DEG) + 360) % 360;
+}
+
+function jsonResponse(data: unknown, status = 200, maxAge = 60): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': maxAge > 0 ? `public, max-age=${maxAge}` : 'no-store',
+    },
+  });
+}
+
+function resolveGoogleKey(request: Request, env: Env): { key: string; source: 'server' | 'client' | 'none' } {
+  const serverKey = env.GOOGLE_MAPS_API_KEY?.trim();
+  if (serverKey) return { key: serverKey, source: 'server' };
+  const headerKey = request.headers.get('X-Google-Maps-Key')?.trim();
+  if (headerKey) return { key: headerKey, source: 'client' };
+  const urlKey = new URL(request.url).searchParams.get('gkey')?.trim();
+  if (urlKey) return { key: urlKey, source: 'client' };
+  return { key: '', source: 'none' };
+}
+
+function googleSessionPayload(type: GoogleSessionType): Record<string, unknown> {
+  switch (type) {
+    case 'hybrid':
+      return {
+        mapType: 'satellite',
+        language: 'es',
+        region: 'CO',
+        layerTypes: ['layerRoadmap'],
+        overlay: false,
+      };
+    case 'satellite':
+      return {
+        mapType: 'satellite',
+        language: 'es',
+        region: 'CO',
+      };
+    case 'streets':
+      return {
+        mapType: 'roadmap',
+        language: 'es',
+        region: 'CO',
+      };
+    case 'sv-overlay':
+      return {
+        mapType: 'satellite',
+        language: 'es',
+        region: 'CO',
+        layerTypes: ['layerStreetview'],
+        overlay: true,
+      };
+    case 'streetview':
+      return {
+        mapType: 'streetview',
+        language: 'es',
+        region: 'CO',
+      };
+  }
+}
+
+async function hashKeyPrefix(apiKey: string): Promise<string> {
+  const data = new TextEncoder().encode(apiKey);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const bytes = new Uint8Array(digest).slice(0, 8);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function getGoogleSessionToken(
+  apiKey: string,
+  type: GoogleSessionType,
+  forceRefresh = false
+): Promise<{ token?: string; error?: string }> {
+  const keyHash = await hashKeyPrefix(apiKey);
+  const cacheUrl = `https://maps-session-cache.internal/v1/${keyHash}/${type}`;
+  const cache = (caches as unknown as { default?: Cache }).default;
+
+  if (!forceRefresh && cache) {
+    try {
+      const hit = await cache.match(cacheUrl);
+      if (hit) {
+        const cached = (await hit.json()) as CachedGoogleSession;
+        if (cached.token && cached.expiresAtMs > Date.now() + 60_000) {
+          return { token: cached.token };
+        }
+      }
+    } catch {
+      // Cache read optional
+    }
+  }
+
+  const res = await fetch(
+    `https://tile.googleapis.com/v1/createSession?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(googleSessionPayload(type)),
+    }
+  );
+
+  const data = (await res.json()) as {
+    session?: string;
+    expiry?: string;
+    error?: { message?: string; status?: string };
+  };
+
+  if (!res.ok || !data.session) {
+    return {
+      error: data.error?.message || `Google Map Tiles session error (${res.status})`,
+    };
+  }
+
+  let expiresAtMs = Date.now() + 6 * 3600 * 1000;
+  if (data.expiry) {
+    const num = Number(data.expiry);
+    if (Number.isFinite(num) && num > 1_000_000_000) {
+      expiresAtMs = num * 1000;
+    } else {
+      const parsed = Date.parse(data.expiry);
+      if (Number.isFinite(parsed)) expiresAtMs = parsed;
+    }
+  }
+
+  if (cache) {
+    const ttlSec = Math.max(300, Math.min(43200, Math.floor((expiresAtMs - Date.now()) / 1000) - 120));
+    try {
+      await cache.put(
+        cacheUrl,
+        new Response(JSON.stringify({ token: data.session, expiresAtMs }), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': `public, max-age=${ttlSec}`,
+          },
+        })
+      );
+    } catch {
+      // ignore cache write failure
+    }
+  }
+
+  return { token: data.session };
+}
+
+function formatGoogleAddress(meta: RawGoogleSvMetadata): string {
+  const comps = meta.addressComponents ?? [];
+  if (comps.length === 0) return '';
+  const parts: string[] = [];
+  for (const c of comps) {
+    const name = c.longName || c.shortName;
+    if (name && !parts.includes(name)) parts.push(name);
+    if (parts.length >= 3) break;
+  }
+  return parts.join(', ');
+}
+
+function normalizeGoogleMetadata(
+  meta: RawGoogleSvMetadata,
+  refLat: number,
+  refLon: number
+) {
+  if (!meta.panoId) return null;
+  const lat = typeof meta.lat === 'number' ? meta.lat : meta.originalLat ?? refLat;
+  const lon = typeof meta.lng === 'number' ? meta.lng : meta.originalLng ?? refLon;
+  const azimuth =
+    typeof meta.heading === 'number' && Number.isFinite(meta.heading)
+      ? ((meta.heading % 360) + 360) % 360
+      : 0;
+
+  const links = (meta.links ?? [])
+    .filter((l) => Boolean(l.panoId) && typeof l.heading === 'number')
+    .map((l) => ({
+      rel: 'related' as const,
+      id: l.panoId!,
+      bearingDeg: ((l.heading! % 360) + 360) % 360,
+      text: l.text?.trim() || undefined,
+    }));
+
+  return {
+    id: meta.panoId,
+    lat,
+    lon,
+    azimuth,
+    tilt: typeof meta.tilt === 'number' ? meta.tilt : 90,
+    roll: typeof meta.roll === 'number' ? meta.roll : 0,
+    distanceMeters: haversineMeters(refLat, refLon, lat, lon),
+    imageWidth: meta.imageWidth ?? 13312,
+    imageHeight: meta.imageHeight ?? 6656,
+    tileWidth: meta.tileWidth ?? 512,
+    tileHeight: meta.tileHeight ?? 512,
+    capturedAt: meta.date,
+    address: formatGoogleAddress(meta) || undefined,
+    copyright: meta.copyright || '© Google',
+    provider: 'google' as const,
+    sourceHost: 'tile.googleapis.com',
+    links,
+  };
+}
+
+async function lookupGoogleStreetView(
+  apiKey: string,
+  lat: number,
+  lon: number,
+  initialRadiusMeters: number
+): Promise<{ item: ReturnType<typeof normalizeGoogleMetadata> | null; radiusUsed: number; error?: string }> {
+  const sess = await getGoogleSessionToken(apiKey, 'streetview');
+  if (!sess.token) {
+    return { item: null, radiusUsed: initialRadiusMeters, error: sess.error };
+  }
+
+  const base = Math.max(50, Math.min(5000, initialRadiusMeters));
+  const radii = Array.from(new Set([base, Math.max(base, 250), Math.max(base, 1200), 5000])).sort(
+    (a, b) => a - b
+  );
+
+  for (const radius of radii) {
+    const url = `https://tile.googleapis.com/v1/streetview/metadata?session=${encodeURIComponent(
+      sess.token
+    )}&key=${encodeURIComponent(apiKey)}&lat=${lat.toFixed(6)}&lng=${lon.toFixed(
+      6
+    )}&radius=${Math.round(radius)}`;
+
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json' },
+      cf: { cacheTtl: 180, cacheEverything: true },
+    } as RequestInit);
+
+    if (res.status === 404) continue;
+    const data = (await res.json()) as RawGoogleSvMetadata;
+    if (res.ok && data.panoId) {
+      return {
+        item: normalizeGoogleMetadata(data, lat, lon),
+        radiusUsed: radius,
+      };
+    }
+    if (res.status === 400 || res.status === 403) {
+      return {
+        item: null,
+        radiusUsed: radius,
+        error: data.error?.message || `Google Street View error (${res.status})`,
+      };
+    }
+  }
+
+  return { item: null, radiusUsed: 5000 };
+}
+
+async function fetchGooglePanoramaById(apiKey: string, panoId: string) {
+  const sess = await getGoogleSessionToken(apiKey, 'streetview');
+  if (!sess.token) return { item: null, error: sess.error };
+
+  const url = `https://tile.googleapis.com/v1/streetview/metadata?session=${encodeURIComponent(
+    sess.token
+  )}&key=${encodeURIComponent(apiKey)}&panoId=${encodeURIComponent(panoId)}`;
+
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cf: { cacheTtl: 300, cacheEverything: true },
+  } as RequestInit);
+
+  const data = (await res.json()) as RawGoogleSvMetadata;
+  if (!res.ok || !data.panoId) {
+    return { item: null, error: data.error?.message || `Panorama not found (${res.status})` };
+  }
+  const lat = data.lat ?? data.originalLat ?? 0;
+  const lon = data.lng ?? data.originalLng ?? 0;
+  return { item: normalizeGoogleMetadata(data, lat, lon) };
+}
+
+async function handleGoogle2DTile(
+  request: Request,
+  env: Env,
+  layer: string,
+  z: string,
+  x: string,
+  y: string
+): Promise<Response> {
+  const validLayers: GoogleSessionType[] = ['hybrid', 'satellite', 'streets', 'sv-overlay'];
+  if (!validLayers.includes(layer as GoogleSessionType)) {
+    return jsonResponse({ error: 'Invalid map layer' }, 400, 0);
+  }
+  if (!/^\d+$/.test(z) || !/^\d+$/.test(x) || !/^\d+$/.test(y)) {
+    return jsonResponse({ error: 'Invalid tile coordinates' }, 400, 0);
+  }
+
+  const { key } = resolveGoogleKey(request, env);
+  if (!key) {
+    return jsonResponse({ error: 'Google Maps API key not configured' }, 401, 0);
+  }
+
+  const sessionType = layer as GoogleSessionType;
+  let sess = await getGoogleSessionToken(key, sessionType, false);
+  if (!sess.token) {
+    return jsonResponse({ error: sess.error || 'Could not initialize Google Map Tiles session' }, 502, 0);
+  }
+
+  const fetchTile = (token: string) =>
+    fetch(
+      `https://tile.googleapis.com/v1/2dtiles/${z}/${x}/${y}?session=${encodeURIComponent(
+        token
+      )}&key=${encodeURIComponent(key)}`,
+      {
+        cf: { cacheTtl: 86400, cacheEverything: true },
+      } as RequestInit
+    );
+
+  let upstream = await fetchTile(sess.token);
+  if (upstream.status === 400 || upstream.status === 403) {
+    sess = await getGoogleSessionToken(key, sessionType, true);
+    if (sess.token) {
+      upstream = await fetchTile(sess.token);
+    }
+  }
+
+  // Google returns 404 for empty sv-overlay tiles (areas with no blue lines) — return transparent 1x1 PNG cleanly!
+  if (upstream.status === 404 && sessionType === 'sv-overlay') {
+    const emptyPng = Uint8Array.from(
+      atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
+      (c) => c.charCodeAt(0)
+    );
+    return new Response(emptyPng, {
+      status: 200,
+      headers: {
+        'Content-Type': 'image/png',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=86400',
+      },
+    });
+  }
+
+  if (!upstream.ok || !upstream.body) {
+    return jsonResponse({ error: `Google tile error (${upstream.status})` }, upstream.status === 404 ? 404 : 502, 0);
+  }
+
+  return new Response(upstream.body, {
+    status: 200,
+    headers: {
+      'Content-Type': upstream.headers.get('content-type') ?? 'image/png',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=86400, immutable',
+    },
+  });
+}
+
+async function handleGoogleSvTile(
+  request: Request,
+  env: Env,
+  z: string,
+  x: string,
+  y: string
+): Promise<Response> {
+  const url = new URL(request.url);
+  const panoId = url.searchParams.get('panoId')?.trim();
+  if (!panoId || !/^[a-zA-Z0-9_-]{8,120}$/.test(panoId)) {
+    return jsonResponse({ error: 'Invalid panoId' }, 400, 0);
+  }
+  if (!/^[0-5]$/.test(z) || !/^\d+$/.test(x) || !/^\d+$/.test(y)) {
+    return jsonResponse({ error: 'Invalid Street View tile coordinates' }, 400, 0);
+  }
+
+  const { key } = resolveGoogleKey(request, env);
+  if (!key) {
+    return jsonResponse({ error: 'Google Maps API key not configured' }, 401, 0);
+  }
+
+  let sess = await getGoogleSessionToken(key, 'streetview', false);
+  if (!sess.token) {
+    return jsonResponse({ error: sess.error || 'Could not initialize Street View session' }, 502, 0);
+  }
+
+  const fetchSvTile = (token: string) =>
+    fetch(
+      `https://tile.googleapis.com/v1/streetview/tiles/${z}/${x}/${y}?session=${encodeURIComponent(
+        token
+      )}&key=${encodeURIComponent(key)}&panoId=${encodeURIComponent(panoId)}`,
+      {
+        cf: { cacheTtl: 86400, cacheEverything: true },
+      } as RequestInit
+    );
+
+  let upstream = await fetchSvTile(sess.token);
+  if (upstream.status === 400 || upstream.status === 403) {
+    sess = await getGoogleSessionToken(key, 'streetview', true);
+    if (sess.token) {
+      upstream = await fetchSvTile(sess.token);
+    }
+  }
+
+  if (!upstream.ok || !upstream.body) {
+    return jsonResponse({ error: `Google SV tile error (${upstream.status})` }, 502, 0);
+  }
+
+  return new Response(upstream.body, {
+    status: 200,
+    headers: {
+      'Content-Type': upstream.headers.get('content-type') ?? 'image/jpeg',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=86400, immutable',
+    },
+  });
 }
 
 function extractCollectionFromHref(href?: string): string | undefined {
@@ -187,17 +627,6 @@ function normalizePanoramaxFeature(
   };
 }
 
-function jsonResponse(data: unknown, status = 200, maxAge = 60): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': maxAge > 0 ? `public, max-age=${maxAge}` : 'no-store',
-    },
-  });
-}
-
 async function searchPanoramax(lat: number, lon: number, initialRadiusMeters: number) {
   const baseRadius = Math.max(250, Math.min(25000, initialRadiusMeters));
   const candidateRadii = Array.from(
@@ -236,7 +665,6 @@ async function searchPanoramax(lat: number, lon: number, initialRadiusMeters: nu
       .sort((a, b) => a.distanceMeters - b.distanceMeters);
 
     if (normalized.length > 0) {
-      // Spread out markers so we don't return 30 frames from the exact same 3m spot
       const selected: typeof normalized = [];
       for (const item of normalized) {
         if (selected.length === 0) {
@@ -247,13 +675,10 @@ async function searchPanoramax(lat: number, lon: number, initialRadiusMeters: nu
         const tooClose = selected.some(
           (s) => haversineMeters(s.lat, s.lon, item.lat, item.lon) < minGap
         );
-        if (!tooClose) {
-          selected.push(item);
-        }
+        if (!tooClose) selected.push(item);
         if (selected.length >= 16) break;
       }
 
-      // Enrich the closest item with any nearby panos as related links if it lacks prev/next
       const primary = selected[0];
       if (primary && primary.links.length === 0 && normalized.length > 1) {
         for (const other of normalized.slice(1, 8)) {
@@ -273,22 +698,14 @@ async function searchPanoramax(lat: number, lon: number, initialRadiusMeters: nu
         }
       }
 
-      return {
-        searchRadiusUsed: radius,
-        items: selected,
-      };
+      return { searchRadiusUsed: radius, items: selected };
     }
   }
 
   return { searchRadiusUsed: 25000, items: [] };
 }
 
-async function searchMapillary(
-  lat: number,
-  lon: number,
-  radiusMeters: number,
-  token: string
-) {
+async function searchMapillary(lat: number, lon: number, radiusMeters: number, token: string) {
   const cosLat = Math.max(0.15, Math.cos(lat * DEG2RAD));
   const r = Math.max(300, Math.min(5000, radiusMeters));
   const dLat = r / 111320;
@@ -339,7 +756,6 @@ async function searchMapillary(
     })
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 
-  // Connect nearby Mapillary 360 frames as navigable steps
   for (const item of items) {
     for (const other of items) {
       if (other.id === item.id) continue;
@@ -360,26 +776,50 @@ async function searchMapillary(
   return items;
 }
 
-async function handlePanoramas(request: Request): Promise<Response> {
+async function handlePanoramas(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const lat = Number(url.searchParams.get('lat'));
   const lon = Number(url.searchParams.get('lon'));
-  const radius = Number(url.searchParams.get('radius') ?? '500');
+  const radius = Number(url.searchParams.get('radius') ?? '250');
 
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
     return jsonResponse({ error: 'Invalid lat/lon coordinates' }, 400, 0);
   }
 
+  const safeRadius = Number.isFinite(radius) ? radius : 250;
+
+  // 1) Primary provider: Google Maps Street View (works on ANY street worldwide!)
+  const { key: googleKey } = resolveGoogleKey(request, env);
+  let googleError: string | undefined;
+  if (googleKey) {
+    const gRes = await lookupGoogleStreetView(googleKey, lat, lon, safeRadius);
+    if (gRes.item) {
+      return jsonResponse(
+        {
+          query: { lat, lon, radiusMeters: safeRadius },
+          searchRadiusUsed: gRes.radiusUsed,
+          provider: 'google',
+          items: [gRes.item],
+        },
+        200,
+        0
+      );
+    }
+    googleError = gRes.error;
+  }
+
+  // 2) Fallback: Open Panoramax / optional Mapillary
   const mapillaryToken = request.headers.get('X-Mapillary-Token')?.trim();
-  const panoramaxResult = await searchPanoramax(lat, lon, Number.isFinite(radius) ? radius : 500);
+  const panoramaxResult = await searchPanoramax(lat, lon, safeRadius);
 
   if (panoramaxResult.items.length > 0 && panoramaxResult.items[0].distanceMeters < 1500) {
     return jsonResponse(
       {
-        query: { lat, lon, radiusMeters: radius },
+        query: { lat, lon, radiusMeters: safeRadius },
         searchRadiusUsed: panoramaxResult.searchRadiusUsed,
         provider: 'panoramax',
         items: panoramaxResult.items,
+        googleError,
       },
       200,
       120
@@ -387,14 +827,15 @@ async function handlePanoramas(request: Request): Promise<Response> {
   }
 
   if (mapillaryToken) {
-    const mapillaryItems = await searchMapillary(lat, lon, radius, mapillaryToken);
+    const mapillaryItems = await searchMapillary(lat, lon, safeRadius, mapillaryToken);
     if (mapillaryItems.length > 0) {
       return jsonResponse(
         {
-          query: { lat, lon, radiusMeters: radius },
-          searchRadiusUsed: radius,
+          query: { lat, lon, radiusMeters: safeRadius },
+          searchRadiusUsed: safeRadius,
           provider: 'mapillary',
           items: mapillaryItems,
+          googleError,
         },
         200,
         0
@@ -404,24 +845,35 @@ async function handlePanoramas(request: Request): Promise<Response> {
 
   return jsonResponse(
     {
-      query: { lat, lon, radiusMeters: radius },
+      query: { lat, lon, radiusMeters: safeRadius },
       searchRadiusUsed: panoramaxResult.searchRadiusUsed,
-      provider: 'panoramax',
+      provider: googleKey ? 'google' : 'panoramax',
       items: panoramaxResult.items,
+      googleError,
     },
     200,
-    120
+    googleKey ? 0 : 120
   );
 }
 
-async function handleSinglePanorama(request: Request): Promise<Response> {
+async function handleSinglePanorama(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const id = url.searchParams.get('id')?.trim();
   const collection = url.searchParams.get('collection')?.trim();
   const provider = url.searchParams.get('provider') ?? 'panoramax';
 
-  if (!id || !/^[a-zA-Z0-9_-]{4,80}$/.test(id)) {
+  if (!id || !/^[a-zA-Z0-9_-]{4,120}$/.test(id)) {
     return jsonResponse({ error: 'Invalid panorama id' }, 400, 0);
+  }
+
+  if (provider === 'google') {
+    const { key: googleKey } = resolveGoogleKey(request, env);
+    if (!googleKey) return jsonResponse({ error: 'Google Maps API key required' }, 401, 0);
+    const res = await fetchGooglePanoramaById(googleKey, id);
+    if (!res.item) {
+      return jsonResponse({ error: res.error || 'Google panorama not found' }, 404, 0);
+    }
+    return jsonResponse(res.item, 200, 0);
   }
 
   if (provider === 'mapillary') {
@@ -474,9 +926,7 @@ async function handleSinglePanorama(request: Request): Promise<Response> {
     cf: { cacheTtl: 300, cacheEverything: true },
   } as RequestInit);
 
-  if (!res.ok) {
-    return jsonResponse({ error: 'Panorama not found' }, 404, 0);
-  }
+  if (!res.ok) return jsonResponse({ error: 'Panorama not found' }, 404, 0);
 
   const data = (await res.json()) as RawPanoramaxFeature & { features?: RawPanoramaxFeature[] };
   const feature = Array.isArray(data.features) ? data.features[0] : data;
@@ -485,11 +935,8 @@ async function handleSinglePanorama(request: Request): Promise<Response> {
   }
   const [lon, lat] = feature.geometry.coordinates;
   const item = normalizePanoramaxFeature(feature, lat, lon);
-  if (!item) {
-    return jsonResponse({ error: 'Panorama missing image assets' }, 404, 0);
-  }
+  if (!item) return jsonResponse({ error: 'Panorama missing image assets' }, 404, 0);
 
-  // If the panorama has no prev/next links in its collection, look up immediate nearby 360s
   if (item.links.length === 0) {
     const nearby = await searchPanoramax(item.lat, item.lon, 250);
     for (const other of nearby.items) {
@@ -516,9 +963,7 @@ async function handleSinglePanorama(request: Request): Promise<Response> {
 async function handleImageProxy(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const target = url.searchParams.get('url');
-  if (!target) {
-    return jsonResponse({ error: 'Missing url parameter' }, 400, 0);
-  }
+  if (!target) return jsonResponse({ error: 'Missing url parameter' }, 400, 0);
 
   let parsed: URL;
   try {
@@ -543,22 +988,52 @@ async function handleImageProxy(request: Request): Promise<Response> {
     return jsonResponse({ error: `Upstream image error (${upstream.status})` }, 502, 0);
   }
 
-  const contentType = upstream.headers.get('content-type') ?? 'image/jpeg';
   return new Response(upstream.body, {
     status: 200,
     headers: {
-      'Content-Type': contentType,
+      'Content-Type': upstream.headers.get('content-type') ?? 'image/jpeg',
       'Access-Control-Allow-Origin': '*',
       'Cache-Control': 'public, max-age=86400, immutable',
     },
   });
 }
 
-async function handleGeocode(request: Request): Promise<Response> {
+async function handleGeocode(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const q = url.searchParams.get('q')?.trim();
-  if (!q || q.length < 2) {
-    return jsonResponse({ results: [] }, 200, 60);
+  if (!q || q.length < 2) return jsonResponse({ results: [] }, 200, 60);
+
+  // Try Google Geocoding first if key is present and Geocoding API is enabled
+  const { key: googleKey } = resolveGoogleKey(request, env);
+  if (googleKey) {
+    try {
+      const gUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
+        q
+      )}&language=es&key=${encodeURIComponent(googleKey)}`;
+      const gRes = await fetch(gUrl, { cf: { cacheTtl: 1800, cacheEverything: true } } as RequestInit);
+      if (gRes.ok) {
+        const gData = (await gRes.json()) as {
+          status?: string;
+          results?: Array<{
+            formatted_address: string;
+            geometry?: { location?: { lat: number; lng: number } };
+            types?: string[];
+          }>;
+        };
+        if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
+          const results = gData.results.slice(0, 6).map((r) => ({
+            name: r.formatted_address.split(',')[0],
+            displayName: r.formatted_address,
+            lat: r.geometry?.location?.lat ?? 0,
+            lon: r.geometry?.location?.lng ?? 0,
+            type: r.types?.[0] ?? 'place',
+          }));
+          return jsonResponse({ results, provider: 'google' }, 200, 600);
+        }
+      }
+    } catch {
+      // Fall through cleanly to Nominatim if Geocoding API isn't enabled on the key
+    }
   }
 
   const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=es,en&q=${encodeURIComponent(
@@ -593,46 +1068,74 @@ async function handleGeocode(request: Request): Promise<Response> {
     type: r.type ?? 'place',
   }));
 
-  return jsonResponse({ results }, 200, 600);
+  return jsonResponse({ results, provider: 'nominatim' }, 200, 600);
 }
 
-export async function handleApiRequest(request: Request): Promise<Response | null> {
+export async function handleApiRequest(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
+  const path = url.pathname;
 
-  if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
+  if (request.method === 'OPTIONS' && path.startsWith('/api/')) {
     return new Response(null, {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Mapillary-Token',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Google-Maps-Key, X-Mapillary-Token',
       },
     });
   }
 
-  if (url.pathname === '/api/health') {
+  if (path === '/api/health') {
+    const { source } = resolveGoogleKey(request, env);
     return jsonResponse({
       ok: true,
       service: 'earthxr-maps',
       domain: 'maps.dcedwin.com',
+      googleEnabled: source !== 'none',
       timestamp: new Date().toISOString(),
     });
   }
 
-  if (url.pathname === '/api/panoramas') {
-    return handlePanoramas(request);
+  if (path === '/api/config') {
+    const { source } = resolveGoogleKey(request, env);
+    return jsonResponse({ googleEnabled: source !== 'none', source }, 200, 0);
   }
 
-  if (url.pathname === '/api/panorama') {
-    return handleSinglePanorama(request);
+  if (path === '/api/gmap/verify') {
+    const { key } = resolveGoogleKey(request, env);
+    if (!key) return jsonResponse({ ok: false, error: 'Falta la clave API de Google Maps' }, 400, 0);
+    const sat = await getGoogleSessionToken(key, 'hybrid', true);
+    if (!sat.token) return jsonResponse({ ok: false, error: sat.error }, 400, 0);
+    const sv = await getGoogleSessionToken(key, 'streetview', true);
+    if (!sv.token) return jsonResponse({ ok: false, error: sv.error }, 400, 0);
+    return jsonResponse({ ok: true }, 200, 0);
   }
 
-  if (url.pathname === '/api/image-proxy') {
+  const gTileMatch = path.match(/^\/api\/gmap\/tile\/([a-z-]+)\/(\d+)\/(\d+)\/(\d+)$/);
+  if (gTileMatch) {
+    return handleGoogle2DTile(request, env, gTileMatch[1], gTileMatch[2], gTileMatch[3], gTileMatch[4]);
+  }
+
+  const gSvTileMatch = path.match(/^\/api\/gmap\/streetview\/tile\/(\d+)\/(\d+)\/(\d+)$/);
+  if (gSvTileMatch) {
+    return handleGoogleSvTile(request, env, gSvTileMatch[1], gSvTileMatch[2], gSvTileMatch[3]);
+  }
+
+  if (path === '/api/panoramas') {
+    return handlePanoramas(request, env);
+  }
+
+  if (path === '/api/panorama') {
+    return handleSinglePanorama(request, env);
+  }
+
+  if (path === '/api/image-proxy') {
     return handleImageProxy(request);
   }
 
-  if (url.pathname === '/api/geocode') {
-    return handleGeocode(request);
+  if (path === '/api/geocode') {
+    return handleGeocode(request, env);
   }
 
   return null;
@@ -641,7 +1144,7 @@ export async function handleApiRequest(request: Request): Promise<Response | nul
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
-      const apiRes = await handleApiRequest(request);
+      const apiRes = await handleApiRequest(request, env);
       if (apiRes) return apiRes;
 
       if (env.ASSETS) {
@@ -651,7 +1154,6 @@ export default {
         return new Response(assetRes.body, { status: assetRes.status, headers });
       }
 
-      // Edge-cached static asset serving from published gh-pages bundle
       const url = new URL(request.url);
       let assetPath = url.pathname;
       if (assetPath === '/' || !assetPath.includes('.')) {

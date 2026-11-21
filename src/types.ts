@@ -2,19 +2,27 @@ export type AppMode = 'globe' | 'streetview';
 
 export type MapLayer = 'satellite' | 'hybrid' | 'streets';
 
+export type ImageryProvider = 'google' | 'panoramax' | 'mapillary';
+
 export interface GeoPoint {
   lat: number;
   lon: number;
+}
+
+export interface ServerConfig {
+  googleEnabled: boolean;
+  source: 'server' | 'client' | 'none';
 }
 
 export interface PanoramaLink {
   rel: 'next' | 'prev' | 'related';
   id: string;
   collection?: string;
-  lat: number;
-  lon: number;
+  lat?: number;
+  lon?: number;
   bearingDeg: number;
-  distanceMeters: number;
+  distanceMeters?: number;
+  text?: string;
 }
 
 export interface PanoramaItem {
@@ -23,12 +31,20 @@ export interface PanoramaItem {
   lat: number;
   lon: number;
   azimuth: number;
+  tilt?: number;
+  roll?: number;
   distanceMeters: number;
-  sdUrl: string;
-  hdUrl: string;
+  sdUrl?: string;
+  hdUrl?: string;
   thumbUrl?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  tileWidth?: number;
+  tileHeight?: number;
   capturedAt?: string;
-  provider: 'panoramax' | 'mapillary';
+  address?: string;
+  copyright?: string;
+  provider: ImageryProvider;
   sourceHost?: string;
   license?: string;
   links: PanoramaLink[];
@@ -41,8 +57,9 @@ export interface PanoramaSearchResponse {
     radiusMeters: number;
   };
   searchRadiusUsed: number;
-  provider: 'panoramax' | 'mapillary';
+  provider: ImageryProvider;
   items: PanoramaItem[];
+  googleError?: string;
 }
 
 export interface GeocodeResult {
@@ -58,9 +75,9 @@ export interface Landmark {
   name: string;
   city: string;
   country: string;
+  region: string;
   lat: number;
   lon: number;
-  region: string;
   defaultAltitudeKm: number;
   verified360Id?: string;
   description: string;

@@ -52,9 +52,9 @@ ${assetMapLines.join('\n')}
 };
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Record<string, string | undefined>): Promise<Response> {
     try {
-      const apiRes = await handleApiRequest(request);
+      const apiRes = await handleApiRequest(request, env);
       if (apiRes) return apiRes;
 
       const url = new URL(request.url);

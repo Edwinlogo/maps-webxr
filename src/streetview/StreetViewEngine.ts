@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { PanoramaItem, PanoramaLink } from '../types';
 import { DEG2RAD, formatDistance } from '../services/geo';
-import { proxyImageUrl } from '../services/api';
+import { googleStreetViewTileUrl, proxyImageUrl } from '../services/api';
 
 interface NavArrowNode {
   link: PanoramaLink;
@@ -21,21 +21,18 @@ function createCompassRingTexture(): THREE.CanvasTexture {
 
   ctx.clearRect(0, 0, size, size);
 
-  // Outer glowing circle
   ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
   ctx.lineWidth = 4;
   ctx.beginPath();
   ctx.arc(c, c, 212, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Inner circle
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(c, c, 178, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Tick marks every 15 deg
   for (let deg = 0; deg < 360; deg += 15) {
     const rad = (deg - 90) * DEG2RAD;
     const isMajor = deg % 90 === 0;
@@ -49,7 +46,6 @@ function createCompassRingTexture(): THREE.CanvasTexture {
     ctx.stroke();
   }
 
-  // Cardinal labels (N at top = -Z when rotated -PI/2 on X)
   const labels: Array<{ t: string; deg: number; col: string }> = [
     { t: 'N', deg: 0, col: '#38bdf8' },
     { t: 'E', deg: 90, col: '#e2e8f0' },
@@ -70,44 +66,49 @@ function createCompassRingTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-function createDistanceTag(label: string): THREE.Sprite {
+function createArrowLabelTag(label: string): THREE.Sprite {
+  const text = label.length > 22 ? `${label.slice(0, 21)}…` : label;
   const canvas = document.createElement('canvas');
-  canvas.width = 180;
-  canvas.height = 56;
+  canvas.width = 320;
+  canvas.height = 64;
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  ctx.fillStyle = 'rgba(7, 15, 32, 0.85)';
-  ctx.strokeStyle = 'rgba(34, 211, 238, 0.9)';
+  ctx.font = '600 22px system-ui, -apple-system, sans-serif';
+  const m = ctx.measureText(text);
+  const pillW = Math.min(304, Math.max(110, m.width + 38));
+  const rx = (canvas.width - pillW) / 2;
+
+  ctx.fillStyle = 'rgba(7, 15, 32, 0.88)';
+  ctx.strokeStyle = 'rgba(34, 211, 238, 0.92)';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.roundRect(12, 8, 156, 40, 20);
+  ctx.roundRect(rx, 10, pillW, 44, 22);
   ctx.fill();
   ctx.stroke();
 
   ctx.fillStyle = '#f8fafc';
-  ctx.font = '600 22px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(label, 90, 29);
+  ctx.fillText(text, canvas.width / 2, 33, pillW - 22);
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(0.68, 0.21, 1);
+  sprite.scale.set(1.1, 0.22, 1);
   sprite.renderOrder = 22;
   return sprite;
 }
 
 function createChevronGeometry(): THREE.BufferGeometry {
   const shape = new THREE.Shape();
-  shape.moveTo(0, 0.36);
-  shape.lineTo(0.32, -0.14);
+  shape.moveTo(0, 0.38);
+  shape.lineTo(0.34, -0.14);
   shape.lineTo(0.18, -0.24);
   shape.lineTo(0, 0.08);
   shape.lineTo(-0.18, -0.24);
-  shape.lineTo(-0.32, -0.14);
+  shape.lineTo(-0.34, -0.14);
   shape.closePath();
 
   const geo = new THREE.ShapeGeometry(shape);
@@ -115,36 +116,118 @@ function createChevronGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
-function loadTextureSafe(url: string, maxTexSize: number): Promise<THREE.Texture> {
+function loadImgElement(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.decoding = 'async';
-    img.onload = () => {
-      let source: HTMLImageElement | HTMLCanvasElement = img;
-      if (img.naturalWidth > maxTexSize || img.naturalHeight > maxTexSize) {
-        const scale = Math.min(maxTexSize / img.naturalWidth, maxTexSize / img.naturalHeight);
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.floor(img.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.floor(img.naturalHeight * scale));
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          source = canvas;
-        }
-      }
-      const tex = new THREE.Texture(source);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.mapping = THREE.EquirectangularReflectionMapping;
-      tex.minFilter = THREE.LinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.generateMipmaps = false;
-      tex.needsUpdate = true;
-      resolve(tex);
-    };
-    img.onerror = () => reject(new Error(`Failed to load 360 image: ${url}`));
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
     img.src = url;
   });
+}
+
+async function loadTextureSafe(url: string, maxTexSize: number): Promise<THREE.Texture> {
+  const img = await loadImgElement(url);
+  let source: HTMLImageElement | HTMLCanvasElement = img;
+  if (img.naturalWidth > maxTexSize || img.naturalHeight > maxTexSize) {
+    const scale = Math.min(maxTexSize / img.naturalWidth, maxTexSize / img.naturalHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.floor(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.floor(img.naturalHeight * scale));
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      source = canvas;
+    }
+  }
+  const tex = new THREE.Texture(source);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+async function stitchGooglePanoramaTexture(
+  pano: PanoramaItem,
+  requestedZoom: number,
+  maxTexSize: number,
+  isCancelled: () => boolean
+): Promise<THREE.Texture | null> {
+  const imgW = pano.imageWidth ?? 13312;
+  const imgH = pano.imageHeight ?? 6656;
+  const tileW = pano.tileWidth ?? 512;
+  const tileH = pano.tileHeight ?? 512;
+
+  const maxZoom = Math.max(0, Math.ceil(Math.log2(imgW / tileW)));
+  const z = Math.min(requestedZoom, maxZoom);
+  const divisor = Math.pow(2, maxZoom - z);
+
+  // Exact equirectangular dimensions at zoom z (clips transparent/black overhang on edge tiles!)
+  const exactW = Math.max(tileW, Math.round(imgW / divisor));
+  const exactH = Math.max(Math.round(tileH / 2), Math.round(imgH / divisor));
+  const cols = Math.ceil(exactW / tileW);
+  const rows = Math.ceil(exactH / tileH);
+
+  const scaleToMax = Math.min(1, maxTexSize / exactW, maxTexSize / exactH);
+  const outW = Math.max(1, Math.round(exactW * scaleToMax));
+  const outH = Math.max(1, Math.round(exactH * scaleToMax));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const coords: Array<{ x: number; y: number }> = [];
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      coords.push({ x, y });
+    }
+  }
+
+  let loadedCount = 0;
+  const concurrency = 8;
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < coords.length) {
+      if (isCancelled()) return;
+      const idx = cursor++;
+      const { x, y } = coords[idx];
+      try {
+        const url = googleStreetViewTileUrl(pano.id, z, x, y);
+        const img = await loadImgElement(url);
+        if (isCancelled()) return;
+        ctx.drawImage(
+          img,
+          Math.floor(x * tileW * scaleToMax),
+          Math.floor(y * tileH * scaleToMax),
+          Math.ceil(tileW * scaleToMax),
+          Math.ceil(tileH * scaleToMax)
+        );
+        loadedCount++;
+      } catch {
+        // Ignore single missing tile if any
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, coords.length) }, () => worker()));
+
+  if (isCancelled() || loadedCount === 0) return null;
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
 }
 
 export class StreetViewEngine {
@@ -164,12 +247,11 @@ export class StreetViewEngine {
 
   private readonly chevronGeo = createChevronGeometry();
   private readonly arrowRingGeo = new THREE.RingGeometry(0.32, 0.42, 32);
-  private readonly hitDiscGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.25, 16);
+  private readonly hitDiscGeo = new THREE.CylinderGeometry(0.58, 0.58, 0.28, 16);
 
   constructor(maxTextureSize = 4096) {
     this.maxTextureSize = Math.min(8192, Math.max(2048, maxTextureSize));
 
-    // Inverted sphere with flipped X so inside text/signs read naturally left-to-right!
     const sphereGeo = new THREE.SphereGeometry(48, 64, 48);
     sphereGeo.scale(-1, 1, 1);
 
@@ -184,7 +266,6 @@ export class StreetViewEngine {
     this.sphereMesh.renderOrder = -10;
     this.root.add(this.sphereMesh);
 
-    // Ground compass ring directly under the user
     const compassGeo = new THREE.PlaneGeometry(1.45, 1.45);
     compassGeo.rotateX(-Math.PI / 2);
     const compassMat = new THREE.MeshBasicMaterial({
@@ -206,10 +287,6 @@ export class StreetViewEngine {
     return this.currentPanorama;
   }
 
-  public getYawOffsetDeg(): number {
-    return ((-(this.yawOffsetRad * 180) / Math.PI) % 360 + 360) % 360;
-  }
-
   public snapTurn(deltaDeg: number): void {
     this.yawOffsetRad -= deltaDeg * DEG2RAD;
     this.root.rotation.y = this.yawOffsetRad;
@@ -225,29 +302,70 @@ export class StreetViewEngine {
     onProgress?: (stage: 'sd' | 'hd' | 'error') => void
   ): Promise<void> {
     const version = ++this.loadVersion;
+    const isCancelled = () => version !== this.loadVersion;
+
     this.currentPanorama = pano;
     this.buildNavArrows(pano.links);
 
     // Align photo center (u=0.5, azimuth degrees from North) to true world North (-Z)
     const azimuth = Number.isFinite(pano.azimuth) ? pano.azimuth : 0;
+    this.sphereMesh.rotation.order = 'YXZ';
     this.sphereMesh.rotation.y = (270 - azimuth) * DEG2RAD;
+    this.sphereMesh.rotation.x = 0;
+    this.sphereMesh.rotation.z = 0;
 
-    // 1) Fast SD load via CORS-safe Worker proxy
-    const sdProxied = proxyImageUrl(pano.sdUrl);
+    // 1) Google Street View multi-tile equirectangular stitcher (z=2 instant -> z=3 4K HD!)
+    if (pano.provider === 'google') {
+      const sdTex = await stitchGooglePanoramaTexture(
+        pano,
+        2,
+        Math.min(2048, this.maxTextureSize),
+        isCancelled
+      );
+      if (isCancelled()) {
+        sdTex?.dispose();
+        return;
+      }
+      if (!sdTex) {
+        onProgress?.('error');
+        return;
+      }
+      this.applyTexture(sdTex);
+      onProgress?.('sd');
+
+      // Progressive upgrade to sharp 4K equirectangular HD (z=3)
+      const hdTex = await stitchGooglePanoramaTexture(pano, 3, this.maxTextureSize, isCancelled);
+      if (isCancelled()) {
+        hdTex?.dispose();
+        return;
+      }
+      if (hdTex) {
+        this.applyTexture(hdTex);
+        onProgress?.('hd');
+      }
+      return;
+    }
+
+    // 2) Single-image equirectangular providers (Panoramax / Mapillary)
+    const sdRaw = pano.sdUrl ?? '';
+    if (!sdRaw) {
+      onProgress?.('error');
+      return;
+    }
+
     try {
-      const sdTex = await loadTextureSafe(sdProxied, Math.min(4096, this.maxTextureSize));
-      if (version !== this.loadVersion) {
+      const sdTex = await loadTextureSafe(proxyImageUrl(sdRaw), Math.min(4096, this.maxTextureSize));
+      if (isCancelled()) {
         sdTex.dispose();
         return;
       }
       this.applyTexture(sdTex);
       onProgress?.('sd');
     } catch {
-      if (version !== this.loadVersion) return;
-      // Fallback: try direct URL if proxy failed in local dev
+      if (isCancelled()) return;
       try {
-        const directTex = await loadTextureSafe(pano.sdUrl, Math.min(4096, this.maxTextureSize));
-        if (version !== this.loadVersion) {
+        const directTex = await loadTextureSafe(sdRaw, Math.min(4096, this.maxTextureSize));
+        if (isCancelled()) {
           directTex.dispose();
           return;
         }
@@ -259,19 +377,17 @@ export class StreetViewEngine {
       }
     }
 
-    // 2) Seamless HD upgrade in background if HD differs from SD
     if (pano.hdUrl && pano.hdUrl !== pano.sdUrl) {
-      const hdProxied = proxyImageUrl(pano.hdUrl);
       try {
-        const hdTex = await loadTextureSafe(hdProxied, this.maxTextureSize);
-        if (version !== this.loadVersion) {
+        const hdTex = await loadTextureSafe(proxyImageUrl(pano.hdUrl), this.maxTextureSize);
+        if (isCancelled()) {
           hdTex.dispose();
           return;
         }
         this.applyTexture(hdTex);
         onProgress?.('hd');
       } catch {
-        // Keep crisp SD texture if HD fails
+        // Keep crisp SD texture
       }
     }
   }
@@ -298,20 +414,18 @@ export class StreetViewEngine {
       const bearingRad = link.bearingDeg * DEG2RAD;
       const dist = 3.2;
 
-      // Geographic bearing: 0° = -Z (North), 90° = +X (East), 180° = +Z (South), 270° = -X (West)
       const dirX = Math.sin(bearingRad);
       const dirZ = -Math.cos(bearingRad);
 
       group.position.set(dirX * dist, 0.24, dirZ * dist);
-      // Point chevron outward along bearing direction
       group.rotation.y = -bearingRad;
 
       const isPrimary = link.rel === 'next' || link.rel === 'prev';
       const chevronMat = new THREE.MeshBasicMaterial({
-        color: isPrimary ? 0x22d3ee : 0x60a5fa,
+        color: isPrimary ? 0x22d3ee : 0x38bdf8,
         side: THREE.DoubleSide,
         transparent: true,
-        opacity: 0.92,
+        opacity: 0.94,
       });
       const chevronMesh = new THREE.Mesh(this.chevronGeo, chevronMat);
       chevronMesh.renderOrder = 20;
@@ -330,8 +444,13 @@ export class StreetViewEngine {
       ringMesh.renderOrder = 19;
       group.add(ringMesh);
 
-      const tag = createDistanceTag(formatDistance(link.distanceMeters));
-      tag.position.set(0, 0.34, 0);
+      const labelText =
+        link.text ||
+        (typeof link.distanceMeters === 'number'
+          ? formatDistance(link.distanceMeters)
+          : `${Math.round(link.bearingDeg)}°`);
+      const tag = createArrowLabelTag(labelText);
+      tag.position.set(0, 0.36, 0);
       group.add(tag);
 
       const hitMat = new THREE.MeshBasicMaterial({ visible: false });
@@ -356,12 +475,8 @@ export class StreetViewEngine {
     return (hits[0].object.userData.navLink as PanoramaLink | undefined) ?? null;
   }
 
-  /**
-   * Returns the link whose geographic bearing is closest to the direction the user is currently facing.
-   */
   public findForwardLink(cameraWorldDir: THREE.Vector3): PanoramaLink | null {
     if (!this.currentPanorama || this.currentPanorama.links.length === 0) return null;
-    // Transform world look direction into StreetView local coordinates (accounting for yawOffsetRad)
     const localDir = cameraWorldDir
       .clone()
       .applyAxisAngle(new THREE.Vector3(0, 1, 0), -this.yawOffsetRad);
@@ -388,7 +503,7 @@ export class StreetViewEngine {
       node.group.position.y = 0.24 + bob;
       node.group.scale.setScalar(hovered ? 1.32 : 1.0);
       const mat = node.chevronMesh.material as THREE.MeshBasicMaterial;
-      mat.color.setHex(hovered ? 0xfef08a : node.link.rel === 'related' ? 0x60a5fa : 0x22d3ee);
+      mat.color.setHex(hovered ? 0xfef08a : 0x22d3ee);
     }
   }
 

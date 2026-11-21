@@ -74,13 +74,13 @@ function createLabelSprite(text: string): THREE.Sprite {
 }
 
 const ORBIT_PRIMARY_IDS = new Set([
+  'bogota',
   'eiffel',
   'nyc',
   'tokyo',
   'sf',
   'buenosaires',
   'taipei',
-  'andes',
   'madrid',
 ]);
 

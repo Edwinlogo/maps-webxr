@@ -1,6 +1,23 @@
-import type { AppMode, GeocodeResult, Landmark, MapLayer, PanoramaItem, PanoramaLink } from '../types';
+import type {
+  AppMode,
+  GeocodeResult,
+  Landmark,
+  MapLayer,
+  PanoramaItem,
+  PanoramaLink,
+  ServerConfig,
+} from '../types';
 import { formatAltitude, formatCoords, formatDistance } from '../services/geo';
-import { geocodePlace, getMapillaryToken, proxyImageUrl, setMapillaryToken } from '../services/api';
+import {
+  geocodePlace,
+  getGoogleMapsKey,
+  getMapillaryToken,
+  googleStreetViewThumbUrl,
+  proxyImageUrl,
+  setGoogleMapsKey,
+  setMapillaryToken,
+  testGoogleMapsKey,
+} from '../services/api';
 
 export interface DesktopHUDCallbacks {
   onSelectLandmark: (landmark: Landmark) => void;
@@ -9,12 +26,14 @@ export interface DesktopHUDCallbacks {
   onExitStreetView: () => void;
   onStepLink: (link: PanoramaLink) => void;
   onSetLayer: (layer: MapLayer) => void;
+  onToggleSvOverlay: () => void;
+  onToggleStreetPick: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onResetGlobe: () => void;
   onRequestXR: () => void;
   onScanHere: () => void;
-  onTokenUpdated: () => void;
+  onKeysUpdated: () => void;
 }
 
 export class DesktopHUD {
@@ -27,6 +46,9 @@ export class DesktopHUD {
   private xrBtn!: HTMLButtonElement;
   private xrBadgeEl!: HTMLElement;
   private modePillEl!: HTMLElement;
+  private googleBtn!: HTMLButtonElement;
+  private svLinesBtn!: HTMLButtonElement;
+  private streetPickBtn!: HTMLButtonElement;
   private coordsEl!: HTMLElement;
   private altEl!: HTMLElement;
   private placeNameEl!: HTMLElement;
@@ -35,19 +57,22 @@ export class DesktopHUD {
   private svTitleEl!: HTMLElement;
   private svMetaEl!: HTMLElement;
   private svActionBtn!: HTMLButtonElement;
-  private svSecondaryBtn!: HTMLButtonElement;
   private svWalkBarEl!: HTMLElement;
   private layerBtns!: NodeListOf<HTMLButtonElement>;
   private drawerEl!: HTMLElement;
   private settingsModalEl!: HTMLElement;
+  private googleKeyInput!: HTMLInputElement;
+  private googleVerifyMsgEl!: HTMLElement;
   private mapillaryInput!: HTMLInputElement;
   private toastEl!: HTMLElement;
+  private setupBannerEl!: HTMLElement;
 
   private searchAbort: AbortController | null = null;
   private searchTimer: number | null = null;
   private toastTimer: number | null = null;
   private currentNearbyPano: PanoramaItem | null = null;
   private currentMode: AppMode = 'globe';
+  private googleConfig: ServerConfig = { googleEnabled: false, source: 'none' };
 
   constructor(root: HTMLElement, landmarks: Landmark[], callbacks: DesktopHUDCallbacks) {
     this.root = root;
@@ -75,13 +100,13 @@ export class DesktopHUD {
     this.root.innerHTML = `
       <div class="hud-top">
         <div class="brand-cluster glass">
-          <button class="icon-btn" id="btn-toggle-drawer" title="Destinos 360°">☰</button>
+          <button class="icon-btn" id="btn-toggle-drawer" title="Destinos">☰</button>
           <div class="brand-title">
             <span class="brand-name">EarthXR</span>
             <span class="mode-pill" id="mode-pill">PLANETA 3D</span>
           </div>
           <div class="search-wrap">
-            <input id="search-input" type="search" placeholder="Buscar ciudad, lugar o dirección..." autocomplete="off" />
+            <input id="search-input" type="search" placeholder="Buscar calle, dirección o ciudad..." autocomplete="off" />
             <div class="search-dropdown hidden" id="search-results"></div>
           </div>
         </div>
@@ -92,6 +117,15 @@ export class DesktopHUD {
             <button class="layer-btn" data-layer="satellite">Satélite</button>
             <button class="layer-btn" data-layer="streets">Calles</button>
           </div>
+          <button class="pill-btn glass active" id="btn-sv-lines" title="Mostrar líneas azules de cobertura Google Street View">
+            Líneas 360°
+          </button>
+          <button class="pill-btn glass" id="btn-street-pick" title="Haz clic sobre cualquier calle del globo para abrir Street View 360°">
+            📍 Clic Calle → 360°
+          </button>
+          <button class="pill-btn glass google-pill" id="btn-google-status" title="Configurar Google Maps API Key">
+            Google Maps
+          </button>
           <button class="icon-btn glass" id="btn-settings" title="Configuración y controles Quest 3">⚙</button>
           <button class="xr-btn" id="btn-enter-xr">
             <span class="xr-dot"></span>
@@ -100,11 +134,16 @@ export class DesktopHUD {
         </div>
       </div>
 
+      <div class="setup-banner glass hidden" id="setup-banner">
+        <span>🗺️ Conecta tu <b>Google Maps API Key</b> (Map Tiles API) para usar mapas de Google y entrar en Street View en <b>cualquier calle del mundo</b>.</span>
+        <button class="sv-btn emerald small-btn" id="btn-banner-setup">Conectar Google Maps</button>
+      </div>
+
       <aside class="landmarks-drawer glass" id="landmarks-drawer">
         <div class="drawer-header">
           <div>
-            <h3>Destinos con Street View 360°</h3>
-            <p>Acércate a cualquier punto del globo o elige un destino verificado</p>
+            <h3>Explorar Destinos</h3>
+            <p>Vuela a cualquier ciudad o busca una calle exacta arriba</p>
           </div>
           <button class="icon-btn small" id="btn-close-drawer">✕</button>
         </div>
@@ -121,7 +160,7 @@ export class DesktopHUD {
         <div class="telemetry glass">
           <div class="tel-place" id="tel-place">Planeta Tierra</div>
           <div class="tel-row">
-            <span id="tel-coords">26.0000° N, 18.0000° O</span>
+            <span id="tel-coords">16.0000° N, 52.0000° O</span>
             <span class="sep">·</span>
             <span id="tel-alt">Altitud: 13.8k km</span>
           </div>
@@ -129,15 +168,14 @@ export class DesktopHUD {
         </div>
 
         <div class="sv-card glass" id="sv-card">
-          <img class="sv-thumb hidden" id="sv-thumb" alt="Vista previa 360°" />
+          <img class="sv-thumb hidden" id="sv-thumb" alt="Vista previa Street View 360°" />
           <div class="sv-info">
             <div class="sv-title" id="sv-title">Street View 360°</div>
-            <div class="sv-meta" id="sv-meta">Acércate a una ciudad para detectar capturas 360°</div>
+            <div class="sv-meta" id="sv-meta">Acércate a cualquier calle o activa "Clic Calle → 360°"</div>
             <div class="sv-walk-bar hidden" id="sv-walk-bar"></div>
           </div>
           <div class="sv-actions">
-            <button class="sv-btn primary" id="sv-action-btn">Buscar 360° aquí</button>
-            <button class="sv-btn ghost hidden" id="sv-secondary-btn">Escanear</button>
+            <button class="sv-btn primary" id="sv-action-btn">Entrar a 360° aquí</button>
           </div>
         </div>
       </div>
@@ -147,40 +185,50 @@ export class DesktopHUD {
       <div class="modal-backdrop hidden" id="settings-modal">
         <div class="modal glass">
           <div class="modal-header">
-            <h3>EarthXR · Controles Meta Quest 3 & Fuentes 360°</h3>
+            <h3>Google Maps + Street View 360° & Controles Meta Quest 3</h3>
             <button class="icon-btn small" id="btn-close-settings">✕</button>
           </div>
           <div class="modal-body">
+            <div class="settings-section google-box">
+              <label for="google-maps-key">Google Maps API Key (Map Tiles API — Satélite, Calles, Líneas Azules y Street View 360° global)</label>
+              <p class="settings-help">
+                1. Crea o abre un proyecto en <b>Google Cloud Console</b> y habilita la API <b>Map Tiles API</b> (opcional: <b>Geocoding API</b>).<br/>
+                2. Pega tu API Key aquí para probar al instante en este navegador, <b>o</b> guárdala como secreto <code>GOOGLE_MAPS_API_KEY</code> en Cloudflare Workers (<code>maps-webxr</code> → Settings → Variables and Secrets) para que funcione automáticamente en tu <b>Meta Quest 3</b> sin escribir nada.
+              </p>
+              <div class="token-row">
+                <input id="google-maps-key" type="password" placeholder="AIzaSy..." value="${getGoogleMapsKey()}" />
+                <button class="sv-btn emerald" id="btn-save-google">Validar y Guardar</button>
+              </div>
+              <div class="verify-msg" id="google-verify-msg"></div>
+            </div>
+
             <div class="guide-grid">
               <div class="guide-box">
                 <h4>Meta Quest 3 (WebXR)</h4>
                 <ul>
-                  <li><b>Stick Izquierdo:</b> Girar / mover el planeta · Avanzar en Street View</li>
-                  <li><b>Stick Derecho:</b> Acercar / alejar · Giro cómodo ±30° en Street View</li>
-                  <li><b>Gatillo (Trigger):</b> Seleccionar lugar, pin 360°, flechas o panel VR</li>
-                  <li><b>Grip (Lateral):</b> Agarrar el globo (dos manos = zoom pellizco)</li>
-                  <li><b>Botón A:</b> Activar Street View 360° · <b>B / Y:</b> Volver al planeta</li>
-                  <li><b>Botón X:</b> Mostrar / recentrar el panel VR flotante</li>
+                  <li><b>Stick Izquierdo:</b> Mover planeta · Empujar adelante para caminar en Street View</li>
+                  <li><b>Stick Derecho:</b> Zoom continuo · Giro cómodo ±30° en Street View</li>
+                  <li><b>Gatillo (Trigger):</b> Apunta a <b>cualquier calle</b> (al acercarte o con "Clic Calle") para entrar en 360°</li>
+                  <li><b>Grip (Lateral):</b> Agarrar el planeta (dos manos = zoom pellizco)</li>
+                  <li><b>Botón A:</b> Entrar a Street View 360° · <b>B / Y:</b> Volver al planeta · <b>X:</b> Panel VR</li>
                 </ul>
               </div>
               <div class="guide-box">
-                <h4>Escritorio / Táctil</h4>
+                <h4>Escritorio / Navegador</h4>
                 <ul>
-                  <li><b>Arrastrar:</b> Rotar el planeta o mirar 360° en Street View</li>
-                  <li><b>Rueda / Pellizco:</b> Zoom continuo desde órbita hasta nivel calle</li>
-                  <li><b>Doble clic en el globo:</b> Volar y escanear Street View 360°</li>
-                  <li><b>Flechas en el suelo 360°:</b> Caminar por la calle panorámica</li>
+                  <li><b>Líneas 360°:</b> Muestra las calles azules oficiales de Google Street View sobre el globo</li>
+                  <li><b>📍 Clic Calle → 360°:</b> Haz clic en cualquier calle y entra directamente en Street View 360°</li>
+                  <li><b>Doble clic en el mapa:</b> Acercarte y buscar Street View al instante</li>
+                  <li><b>Flechas 3D en el suelo:</b> Camina paso a paso por las intersecciones reales</li>
                 </ul>
               </div>
             </div>
+
             <div class="settings-section">
-              <label for="mapillary-token">Token opcional de Mapillary (cobertura 360° adicional)</label>
-              <p class="settings-help">
-                Por defecto EarthXR usa <b>Panoramax</b> (100% libre y sin clave). Si deseas añadir cobertura global de Mapillary para ciudades sin capturas en Panoramax, pega tu Client Token gratuito aquí (se guarda solo en tu navegador):
-              </p>
+              <label for="mapillary-token">Token opcional de Mapillary (respaldo si no usas Google Maps)</label>
               <div class="token-row">
                 <input id="mapillary-token" type="password" placeholder="MLY|..." value="${getMapillaryToken()}" />
-                <button class="sv-btn primary" id="btn-save-token">Guardar</button>
+                <button class="sv-btn ghost" id="btn-save-mapillary">Guardar</button>
               </div>
             </div>
           </div>
@@ -193,6 +241,9 @@ export class DesktopHUD {
     this.xrBtn = this.root.querySelector('#btn-enter-xr')!;
     this.xrBadgeEl = this.root.querySelector('#xr-badge')!;
     this.modePillEl = this.root.querySelector('#mode-pill')!;
+    this.googleBtn = this.root.querySelector('#btn-google-status')!;
+    this.svLinesBtn = this.root.querySelector('#btn-sv-lines')!;
+    this.streetPickBtn = this.root.querySelector('#btn-street-pick')!;
     this.coordsEl = this.root.querySelector('#tel-coords')!;
     this.altEl = this.root.querySelector('#tel-alt')!;
     this.placeNameEl = this.root.querySelector('#tel-place')!;
@@ -201,13 +252,15 @@ export class DesktopHUD {
     this.svTitleEl = this.root.querySelector('#sv-title')!;
     this.svMetaEl = this.root.querySelector('#sv-meta')!;
     this.svActionBtn = this.root.querySelector('#sv-action-btn')!;
-    this.svSecondaryBtn = this.root.querySelector('#sv-secondary-btn')!;
     this.svWalkBarEl = this.root.querySelector('#sv-walk-bar')!;
     this.layerBtns = this.root.querySelectorAll('.layer-btn');
     this.drawerEl = this.root.querySelector('#landmarks-drawer')!;
     this.settingsModalEl = this.root.querySelector('#settings-modal')!;
+    this.googleKeyInput = this.root.querySelector('#google-maps-key')!;
+    this.googleVerifyMsgEl = this.root.querySelector('#google-verify-msg')!;
     this.mapillaryInput = this.root.querySelector('#mapillary-token')!;
     this.toastEl = this.root.querySelector('#toast')!;
+    this.setupBannerEl = this.root.querySelector('#setup-banner')!;
   }
 
   private bindEvents(): void {
@@ -239,6 +292,11 @@ export class DesktopHUD {
       });
     });
 
+    this.svLinesBtn.addEventListener('click', () => this.callbacks.onToggleSvOverlay());
+    this.streetPickBtn.addEventListener('click', () => this.callbacks.onToggleStreetPick());
+    this.googleBtn.addEventListener('click', () => this.openSettings());
+    this.root.querySelector('#btn-banner-setup')?.addEventListener('click', () => this.openSettings());
+
     this.root.querySelector('#btn-zoom-in')?.addEventListener('click', () => this.callbacks.onZoomIn());
     this.root.querySelector('#btn-zoom-out')?.addEventListener('click', () => this.callbacks.onZoomOut());
     this.root.querySelector('#btn-reset')?.addEventListener('click', () => this.callbacks.onResetGlobe());
@@ -254,28 +312,51 @@ export class DesktopHUD {
       }
     });
 
-    this.svSecondaryBtn.addEventListener('click', () => {
-      this.callbacks.onScanHere();
-    });
-
     // Settings modal
-    this.root.querySelector('#btn-settings')?.addEventListener('click', () => {
-      this.settingsModalEl.classList.remove('hidden');
-    });
+    this.root.querySelector('#btn-settings')?.addEventListener('click', () => this.openSettings());
     this.root.querySelector('#btn-close-settings')?.addEventListener('click', () => {
       this.settingsModalEl.classList.add('hidden');
     });
     this.settingsModalEl.addEventListener('click', (e) => {
       if (e.target === this.settingsModalEl) this.settingsModalEl.classList.add('hidden');
     });
-    this.root.querySelector('#btn-save-token')?.addEventListener('click', () => {
-      setMapillaryToken(this.mapillaryInput.value);
-      this.settingsModalEl.classList.add('hidden');
-      this.showToast('Token guardado localmente');
-      this.callbacks.onTokenUpdated();
+
+    this.root.querySelector('#btn-save-google')?.addEventListener('click', async () => {
+      const key = this.googleKeyInput.value.trim();
+      if (!key) {
+        setGoogleMapsKey('');
+        this.googleVerifyMsgEl.textContent = 'Clave local borrada.';
+        this.googleVerifyMsgEl.className = 'verify-msg';
+        this.callbacks.onKeysUpdated();
+        return;
+      }
+      this.googleVerifyMsgEl.textContent = 'Verificando Map Tiles API y Street View con Google...';
+      this.googleVerifyMsgEl.className = 'verify-msg';
+      try {
+        const res = await testGoogleMapsKey(key);
+        if (res.ok) {
+          setGoogleMapsKey(key);
+          this.googleVerifyMsgEl.textContent = '✓ ¡Google Maps y Street View 360° verificados y activados!';
+          this.googleVerifyMsgEl.className = 'verify-msg ok';
+          this.callbacks.onKeysUpdated();
+          window.setTimeout(() => this.settingsModalEl.classList.add('hidden'), 900);
+        } else {
+          this.googleVerifyMsgEl.textContent = `✕ Error de Google: ${res.error ?? 'Revisa que Map Tiles API y facturación estén activas.'}`;
+          this.googleVerifyMsgEl.className = 'verify-msg err';
+        }
+      } catch {
+        this.googleVerifyMsgEl.textContent = '✕ No se pudo contactar el servidor para validar la clave.';
+        this.googleVerifyMsgEl.className = 'verify-msg err';
+      }
     });
 
-    // Place search (Nominatim)
+    this.root.querySelector('#btn-save-mapillary')?.addEventListener('click', () => {
+      setMapillaryToken(this.mapillaryInput.value);
+      this.showToast('Token de Mapillary guardado');
+      this.callbacks.onKeysUpdated();
+    });
+
+    // Place search
     this.searchInput.addEventListener('input', () => {
       const q = this.searchInput.value.trim();
       if (this.searchTimer) window.clearTimeout(this.searchTimer);
@@ -305,6 +386,17 @@ export class DesktopHUD {
     if (window.innerWidth < 1024) {
       this.drawerEl.classList.add('collapsed');
     }
+  }
+
+  public openSettings(): void {
+    this.googleKeyInput.value = getGoogleMapsKey();
+    this.googleVerifyMsgEl.textContent =
+      this.googleConfig.source === 'server'
+        ? '✓ Google Maps ya está activo desde el servidor (Cloudflare Worker Secret).'
+        : '';
+    this.googleVerifyMsgEl.className =
+      this.googleConfig.source === 'server' ? 'verify-msg ok' : 'verify-msg';
+    this.settingsModalEl.classList.remove('hidden');
   }
 
   private async runSearch(query: string, autoSelectFirst = false): Promise<void> {
@@ -352,6 +444,32 @@ export class DesktopHUD {
     }
   }
 
+  public setGoogleConfig(cfg: ServerConfig): void {
+    this.googleConfig = cfg;
+    if (cfg.googleEnabled) {
+      this.googleBtn.textContent = 'Google Maps ✓';
+      this.googleBtn.classList.add('connected');
+      this.googleBtn.classList.remove('needs-key');
+      this.setupBannerEl.classList.add('hidden');
+      this.svLinesBtn.classList.remove('hidden');
+    } else {
+      this.googleBtn.textContent = 'Conectar Google Maps';
+      this.googleBtn.classList.remove('connected');
+      this.googleBtn.classList.add('needs-key');
+      this.setupBannerEl.classList.remove('hidden');
+      this.svLinesBtn.classList.add('hidden');
+    }
+  }
+
+  public setSvOverlayActive(active: boolean): void {
+    this.svLinesBtn.classList.toggle('active', active);
+  }
+
+  public setStreetPickActive(active: boolean): void {
+    this.streetPickBtn.classList.toggle('picking', active);
+    this.streetPickBtn.textContent = active ? '📍 Haz clic en una calle...' : '📍 Clic Calle → 360°';
+  }
+
   public setXRSupport(supported: boolean, active: boolean): void {
     const label = this.root.querySelector('#xr-btn-label')!;
     if (active) {
@@ -366,7 +484,7 @@ export class DesktopHUD {
     } else {
       this.xrBtn.classList.remove('active', 'ready');
       label.textContent = 'WebXR VR (Abrir en Quest 3)';
-      this.xrBadgeEl.textContent = 'Modo Escritorio · Abre maps.dcedwin.com en tu Meta Quest 3 para inmersión VR';
+      this.xrBadgeEl.textContent = 'Modo Escritorio · Abre maps.dcedwin.com en Meta Quest 3 para VR';
     }
   }
 
@@ -389,19 +507,31 @@ export class DesktopHUD {
     this.modePillEl.textContent = isSV ? 'STREET VIEW 360°' : 'PLANETA 3D';
     this.modePillEl.classList.toggle('sv', isSV);
     this.root.querySelector('#zoom-stack')?.classList.toggle('hidden', isSV);
+    this.streetPickBtn.classList.toggle('hidden', isSV);
 
     if (isSV && activePano) {
       this.svCardEl.classList.add('ready');
       this.svThumbEl.classList.add('hidden');
-      this.svTitleEl.textContent = 'Modo Street View 360° activo';
+      this.svTitleEl.textContent = activePano.address || 'Street View 360° activo';
       const qLabel =
-        quality === 'hd' ? 'HD 4K' : quality === 'sd' ? 'Cargando HD...' : quality === 'error' ? 'Error de carga' : 'Cargando 360°...';
-      const prov = activePano.provider === 'mapillary' ? 'Mapillary' : 'Panoramax';
-      this.svMetaEl.textContent = `${prov} · ${qLabel} · Arrastra o gira tu visor para mirar 360°`;
+        quality === 'hd'
+          ? 'HD 4K'
+          : quality === 'sd'
+            ? 'Mejorando a HD...'
+            : quality === 'error'
+              ? 'Error de carga'
+              : 'Cargando 360°...';
+      const prov =
+        activePano.provider === 'google'
+          ? activePano.copyright || '© Google'
+          : activePano.provider === 'mapillary'
+            ? 'Mapillary'
+            : 'Panoramax';
+      const datePart = activePano.capturedAt ? ` · ${activePano.capturedAt.slice(0, 10)}` : '';
+      this.svMetaEl.textContent = `${prov}${datePart} · ${qLabel}`;
       this.svActionBtn.textContent = 'Volver al Planeta 3D';
       this.svActionBtn.classList.add('amber');
       this.svActionBtn.classList.remove('emerald');
-      this.svSecondaryBtn.classList.add('hidden');
       this.renderWalkLinks(activePano.links);
     } else {
       this.svWalkBarEl.classList.add('hidden');
@@ -420,8 +550,10 @@ export class DesktopHUD {
       .slice(0, 4)
       .map((lk, idx) => {
         const label =
-          lk.rel === 'next' ? 'Avanzar' : lk.rel === 'prev' ? 'Retroceder' : `Paso ${idx + 1}`;
-        return `<button class="walk-pill" data-idx="${idx}">↗ ${label} (${formatDistance(lk.distanceMeters)})</button>`;
+          lk.text ||
+          (lk.rel === 'next' ? 'Avanzar' : lk.rel === 'prev' ? 'Retroceder' : `Dirección ${Math.round(lk.bearingDeg)}°`);
+        const suffix = typeof lk.distanceMeters === 'number' ? ` (${formatDistance(lk.distanceMeters)})` : '';
+        return `<button class="walk-pill" data-idx="${idx}">↗ ${label}${suffix}</button>`;
       })
       .join('');
 
@@ -444,40 +576,45 @@ export class DesktopHUD {
     if (searching) {
       this.svCardEl.classList.remove('ready');
       this.svTitleEl.textContent = 'Buscando Street View 360°...';
-      this.svMetaEl.textContent = 'Consultando capturas panorámicas cercanas a esta posición';
+      this.svMetaEl.textContent = 'Consultando panoramas en esta calle';
       this.svActionBtn.textContent = 'Buscando...';
       this.svActionBtn.classList.remove('emerald');
-      this.svSecondaryBtn.classList.add('hidden');
       return;
     }
 
     if (pano) {
       this.svCardEl.classList.add('ready');
-      const thumb = pano.thumbUrl || pano.sdUrl;
+      const thumb =
+        pano.provider === 'google'
+          ? googleStreetViewThumbUrl(pano.id)
+          : pano.thumbUrl || pano.sdUrl
+            ? proxyImageUrl(pano.thumbUrl || pano.sdUrl!)
+            : '';
       if (thumb) {
-        this.svThumbEl.src = proxyImageUrl(thumb);
+        this.svThumbEl.src = thumb;
         this.svThumbEl.classList.remove('hidden');
       }
-      this.svTitleEl.textContent = '¡Street View 360° disponible!';
-      this.svMetaEl.textContent = `A ${formatDistance(pano.distanceMeters)} del punto actual · ${
-        pano.links.length > 0 ? `${pano.links.length} pasos conectados` : 'Vista panorámica 360°'
+      this.svTitleEl.textContent = pano.address
+        ? `Street View 360° · ${pano.address}`
+        : '¡Street View 360° disponible!';
+      const provTag = pano.provider === 'google' ? 'Google Street View' : pano.provider === 'mapillary' ? 'Mapillary' : 'Panoramax';
+      this.svMetaEl.textContent = `${provTag} · A ${formatDistance(pano.distanceMeters)} · ${
+        pano.links.length > 0 ? `${pano.links.length} direcciones` : 'Vista 360°'
       }`;
       this.svActionBtn.textContent = 'Entrar a Street View 360°';
       this.svActionBtn.classList.add('emerald');
-      this.svSecondaryBtn.classList.add('hidden');
     } else {
       this.svCardEl.classList.remove('ready');
       this.svThumbEl.classList.add('hidden');
       this.svTitleEl.textContent = 'Street View 360°';
       this.svMetaEl.textContent =
-        hintText ?? 'Acércate a una ciudad o haz clic en cualquier marcador azul del planeta';
-      this.svActionBtn.textContent = 'Buscar 360° aquí';
+        hintText ?? 'Acércate a cualquier calle o pulsa "📍 Clic Calle → 360°"';
+      this.svActionBtn.textContent = 'Entrar a 360° aquí';
       this.svActionBtn.classList.remove('emerald');
-      this.svSecondaryBtn.classList.add('hidden');
     }
   }
 
-  public showToast(msg: string, durationMs = 2800): void {
+  public showToast(msg: string, durationMs = 3000): void {
     this.toastEl.textContent = msg;
     this.toastEl.classList.remove('hidden');
     if (this.toastTimer) window.clearTimeout(this.toastTimer);
