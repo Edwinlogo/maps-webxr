@@ -8,6 +8,7 @@ import type {
 } from '../types';
 
 const STORAGE_GOOGLE_KEY = 'earthxr_google_maps_key';
+const STORAGE_GOOGLE_ENABLED = 'earthxr_google_maps_enabled';
 const STORAGE_MAPILLARY_KEY = 'earthxr_mapillary_token';
 
 export function getGoogleMapsKey(): string {
@@ -26,6 +27,25 @@ export function setGoogleMapsKey(key: string): void {
     } else {
       localStorage.removeItem(STORAGE_GOOGLE_KEY);
     }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function isGoogleMapsPreferred(): boolean {
+  try {
+    const raw = localStorage.getItem(STORAGE_GOOGLE_ENABLED);
+    if (raw === '1') return true;
+    if (raw === '0') return false;
+    return Boolean(getGoogleMapsKey());
+  } catch {
+    return false;
+  }
+}
+
+export function setGoogleMapsPreferred(enabled: boolean): void {
+  try {
+    localStorage.setItem(STORAGE_GOOGLE_ENABLED, enabled ? '1' : '0');
   } catch {
     // ignore storage errors
   }
@@ -60,6 +80,8 @@ export function proxyImageUrl(rawUrl: string): string {
 
 export function buildApiHeaders(): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' };
+  const useGoogle = isGoogleMapsPreferred();
+  headers['X-Use-Google-Maps'] = useGoogle ? '1' : '0';
   const googleKey = getGoogleMapsKey();
   if (googleKey) headers['X-Google-Maps-Key'] = googleKey;
   const mapillaryToken = getMapillaryToken();
@@ -87,10 +109,22 @@ export function googleStreetViewThumbUrl(panoId: string): string {
 export async function fetchServerConfig(): Promise<ServerConfig> {
   try {
     const res = await fetch('/api/config', { headers: buildApiHeaders() });
-    if (!res.ok) return { googleEnabled: Boolean(getGoogleMapsKey()), source: getGoogleMapsKey() ? 'client' : 'none' };
+    if (!res.ok) {
+      return {
+        googleConfigured: Boolean(getGoogleMapsKey()),
+        googleSource: getGoogleMapsKey() ? 'client' : 'none',
+        googleActive: isGoogleMapsPreferred() && Boolean(getGoogleMapsKey()),
+        mapillaryConfigured: Boolean(getMapillaryToken()),
+      };
+    }
     return (await res.json()) as ServerConfig;
   } catch {
-    return { googleEnabled: Boolean(getGoogleMapsKey()), source: getGoogleMapsKey() ? 'client' : 'none' };
+    return {
+      googleConfigured: Boolean(getGoogleMapsKey()),
+      googleSource: getGoogleMapsKey() ? 'client' : 'none',
+      googleActive: isGoogleMapsPreferred() && Boolean(getGoogleMapsKey()),
+      mapillaryConfigured: Boolean(getMapillaryToken()),
+    };
   }
 }
 
@@ -107,7 +141,7 @@ export async function testGoogleMapsKey(key: string): Promise<{ ok: boolean; err
 export async function searchPanoramasNear(
   lat: number,
   lon: number,
-  radiusMeters = 250,
+  radiusMeters = 300,
   signal?: AbortSignal
 ): Promise<PanoramaSearchResponse> {
   const params = new URLSearchParams({
@@ -128,7 +162,7 @@ export async function searchPanoramasNear(
 export async function fetchPanoramaById(
   id: string,
   collection?: string,
-  provider: ImageryProvider = 'google',
+  provider: ImageryProvider = 'panoramax',
   signal?: AbortSignal
 ): Promise<PanoramaItem> {
   const params = new URLSearchParams({ id, provider });
@@ -147,7 +181,7 @@ export async function geocodePlace(query: string, signal?: AbortSignal): Promise
   const q = query.trim();
   if (!q) return [];
   const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`, {
-    headers: buildApiHeaders(),
+    headers: { Accept: 'application/json' },
     signal,
   });
   if (!res.ok) {

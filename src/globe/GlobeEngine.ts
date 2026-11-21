@@ -236,6 +236,7 @@ export class GlobeEngine {
   public readonly globeGroup = new THREE.Group();
   public readonly tileGroup = new THREE.Group();
   public readonly starfield: THREE.Points;
+  public readonly spaceSkyDome: THREE.Mesh;
 
   private tileManager: TileManager;
   private activeTiles = new Map<string, TileMeshEntry>();
@@ -275,6 +276,18 @@ export class GlobeEngine {
 
   constructor(maxAnisotropy = 4) {
     this.tileManager = new TileManager(maxAnisotropy);
+
+    // Opaque deep-space sky dome: occludes Meta Quest 3 Passthrough when in Stars mode,
+    // and hides cleanly when toggled to Passthrough (Reality) mode without restarting WebXR!
+    const skyGeo = new THREE.SphereGeometry(290, 32, 24);
+    const skyMat = new THREE.MeshBasicMaterial({
+      color: 0x030712,
+      side: THREE.BackSide,
+      depthWrite: false,
+    });
+    this.spaceSkyDome = new THREE.Mesh(skyGeo, skyMat);
+    this.spaceSkyDome.renderOrder = -60;
+    this.root.add(this.spaceSkyDome);
 
     this.starfield = createStarfield();
     this.root.add(this.starfield);
@@ -358,6 +371,11 @@ export class GlobeEngine {
   public getSurfaceRadialOffset(): number {
     const z = this.computeDesiredZoom();
     return 1 + (z - 2) * 0.00045 + 0.0005;
+  }
+
+  public setPassthroughMode(enabled: boolean): void {
+    this.spaceSkyDome.visible = !enabled;
+    this.starfield.visible = !enabled;
   }
 
   public setGoogleMode(enabled: boolean): void {

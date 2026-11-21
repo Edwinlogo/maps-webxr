@@ -10,8 +10,10 @@ export interface GeoPoint {
 }
 
 export interface ServerConfig {
-  googleEnabled: boolean;
-  source: 'server' | 'client' | 'none';
+  googleConfigured: boolean;
+  googleSource: 'server' | 'client' | 'none';
+  googleActive: boolean;
+  mapillaryConfigured: boolean;
 }
 
 export interface PanoramaLink {

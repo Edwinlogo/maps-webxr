@@ -38,7 +38,8 @@ class EarthXRApp {
   private fadeTarget = 0;
 
   private mode: AppMode = 'globe';
-  private googleEnabled = false;
+  private googleActive = false;
+  private passthroughEnabled = false;
   private streetPickMode = false;
   private activeLocationLabel = 'Planeta Tierra';
   private nearbyPanoramas: PanoramaItem[] = [];
@@ -59,26 +60,30 @@ class EarthXRApp {
   private mouseRaycaster = new THREE.Raycaster();
   private mouseNdc = new THREE.Vector2();
 
-  private xrSupported = false;
+  private arSupported = false;
+  private vrSupported = false;
   private prevTimeSec = performance.now() / 1000;
 
   constructor() {
     this.canvas = document.getElementById('xr-canvas') as HTMLCanvasElement;
     const hudRoot = document.getElementById('hud-root') as HTMLElement;
 
+    // alpha: true enables true color Passthrough (Mixed Reality) on Meta Quest 3!
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
       antialias: true,
+      alpha: true,
       powerPreference: 'high-performance',
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.xr.enabled = true;
     this.renderer.xr.setReferenceSpaceType('local-floor');
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x030712);
+    this.scene.background = null; // Space dome handles opaque starfield; hiding it reveals Passthrough!
 
     this.camera = new THREE.PerspectiveCamera(
       56,
@@ -92,7 +97,7 @@ class EarthXRApp {
     this.desktopRig.add(this.camera);
     this.scene.add(this.desktopRig);
 
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.88));
     const dirLight = new THREE.DirectionalLight(0xbae6fd, 0.9);
     dirLight.position.set(2, 4, 3);
     this.scene.add(dirLight);
@@ -122,9 +127,9 @@ class EarthXRApp {
 
     this.vrHud = new VRSpatialHUD(LANDMARKS, {
       onToggleStreetView: () => this.toggleStreetViewFromAction(),
+      onTogglePassthrough: () => this.togglePassthrough(),
       onSelectLandmark: (lm) => this.visitLandmark(lm),
       onSetLayer: (layer) => this.setLayer(layer),
-      onToggleSvOverlay: () => this.toggleSvOverlay(),
       onToggleStreetPick: () => this.toggleStreetPick(),
       onZoomIn: () => this.globe.zoomByFactor(0.52),
       onZoomOut: () => this.globe.zoomByFactor(1.85),
@@ -148,12 +153,8 @@ class EarthXRApp {
       },
       onRightStick: (x, y, dt) => {
         if (this.mode !== 'globe') return;
-        if (Math.abs(y) > 0.16) {
-          this.globe.zoomByFactor(Math.exp(y * dt * 1.9));
-        }
-        if (Math.abs(x) > 0.25) {
-          this.globe.rotateHeading(x * dt * 68);
-        }
+        if (Math.abs(y) > 0.16) this.globe.zoomByFactor(Math.exp(y * dt * 1.9));
+        if (Math.abs(x) > 0.25) this.globe.rotateHeading(x * dt * 68);
       },
       onSnapTurn: (dir) => {
         if (this.mode === 'streetview') this.streetView.snapTurn(dir * 30);
@@ -176,12 +177,40 @@ class EarthXRApp {
           this.vrHud.recenterToCamera(this.renderer.xr.getCamera());
         }
       },
-      onSingleGripDrag: (deltaWorld) => {
-        const alt = this.globe.getState().altitudeKm;
-        const scale = THREE.MathUtils.clamp((alt / 6371) * 85, 0.012, 95);
-        this.globe.panByDegrees(-deltaWorld.y * scale, -deltaWorld.x * scale);
+      // Bare-hand Pinch + Move OR Controller Drag: rotates Planet OR rotates 360° Street View!
+      onRotateViewDrag: (deltaWorld) => {
+        if (this.mode === 'globe') {
+          const alt = this.globe.getState().altitudeKm;
+          const scale = THREE.MathUtils.clamp((alt / 6371) * 110, 0.014, 125);
+          this.globe.panByDegrees(-deltaWorld.y * scale, -deltaWorld.x * scale);
+        } else {
+          // Swipe with bare hand to spin the 360° street panorama effortlessly!
+          this.streetView.snapTurn(-deltaWorld.x * 165);
+        }
       },
-      onTwoHandZoom: (ratio) => this.globe.zoomByFactor(ratio),
+      // Bare-hand Two-Hand Spread / Pinch-Out Zoom!
+      onTwoHandZoom: (ratio) => {
+        if (this.mode === 'globe') {
+          this.globe.zoomByFactor(ratio);
+        }
+      },
+      // Movable 3D Control Panel Grab Handle!
+      onTestPanelGrab: (ray) => {
+        const hit = this.vrHud.hitTestGrabHandle(ray);
+        if (hit) this.vrHud.setGrabState(true, true);
+        return hit;
+      },
+      onTestPanelBody: (ray) => {
+        const hit = this.vrHud.testHover(ray);
+        return Boolean(hit && !hit.isGrab);
+      },
+      onPanelDragMove: (worldPos) => {
+        const cam = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+        this.vrHud.moveToWorldPosition(worldPos, cam);
+      },
+      onPanelDragEnd: () => {
+        this.vrHud.setGrabState(false, false);
+      },
     });
 
     this.desktopHud = new DesktopHUD(hudRoot, LANDMARKS, {
@@ -191,6 +220,7 @@ class EarthXRApp {
       onExitStreetView: () => this.exitStreetView(),
       onStepLink: (link) => this.stepToLink(link),
       onSetLayer: (layer) => this.setLayer(layer),
+      onTogglePassthrough: () => this.togglePassthrough(),
       onToggleSvOverlay: () => this.toggleSvOverlay(),
       onToggleStreetPick: () => this.toggleStreetPick(),
       onZoomIn: () => this.globe.zoomByFactor(0.55),
@@ -199,37 +229,53 @@ class EarthXRApp {
         this.activeLocationLabel = 'Planeta Tierra';
         this.globe.resetView();
       },
-      onRequestXR: () => this.toggleXRSession(),
+      onRequestXR: (preferPassthrough) => this.toggleXRSession(preferPassthrough),
       onScanHere: () => {
         const st = this.globe.getState();
         this.openStreetViewAtCoords(st.lat, st.lon);
       },
-      onKeysUpdated: () => this.refreshServerConfig(),
+      onConfigUpdated: () => this.refreshServerConfig(),
     });
 
+    this.applyPassthroughState(false);
     this.bindDesktopEvents();
     this.setupWebXR();
     this.refreshServerConfig();
     this.renderer.setAnimationLoop(() => this.tick());
   }
 
+  private applyPassthroughState(enabled: boolean): void {
+    this.passthroughEnabled = enabled;
+    this.globe.setPassthroughMode(enabled);
+    this.xrControllers.setPassthroughMode(enabled);
+    this.desktopHud.setPassthroughUI(enabled);
+    this.vrHud.updateState({ passthrough: enabled });
+    document.body.classList.toggle('passthrough-preview', enabled);
+  }
+
+  private togglePassthrough(): void {
+    const next = !this.passthroughEnabled;
+    this.applyPassthroughState(next);
+    if (!this.renderer.xr.isPresenting) {
+      this.desktopHud.showToast(
+        next
+          ? 'Modo Realidad (Passthrough) listo para Meta Quest 3'
+          : 'Fondo Espacio con estrellas activo'
+      );
+    }
+  }
+
   private async refreshServerConfig(): Promise<void> {
     const cfg = await fetchServerConfig();
-    this.googleEnabled = cfg.googleEnabled;
-    this.globe.setGoogleMode(cfg.googleEnabled);
-    this.desktopHud.setGoogleConfig(cfg);
+    this.googleActive = cfg.googleActive;
+    this.globe.setGoogleMode(cfg.googleActive);
+    this.desktopHud.setServerConfig(cfg);
     this.desktopHud.setSvOverlayActive(this.globe.getStreetViewOverlay());
-    this.vrHud.updateState({
-      googleEnabled: cfg.googleEnabled,
-      showSvOverlay: this.globe.getStreetViewOverlay(),
-    });
+    this.vrHud.updateState({ googleActive: cfg.googleActive });
 
-    if (cfg.googleEnabled) {
-      this.desktopHud.showToast('Google Maps + Street View 360° activos en todo el planeta');
-      const st = this.globe.getState();
-      if (st.altitudeKm <= 30) {
-        this.scanStreetViewNear(st.lat, st.lon, false);
-      }
+    const st = this.globe.getState();
+    if (st.altitudeKm <= 30) {
+      this.scanStreetViewNear(st.lat, st.lon, false);
     }
   }
 
@@ -237,12 +283,6 @@ class EarthXRApp {
     const next = !this.globe.getStreetViewOverlay();
     this.globe.setStreetViewOverlay(next);
     this.desktopHud.setSvOverlayActive(next);
-    this.vrHud.updateState({ showSvOverlay: next });
-    this.desktopHud.showToast(
-      next
-        ? 'Líneas azules de Street View activadas (visibles al acercarte)'
-        : 'Líneas azules de Street View ocultas'
-    );
   }
 
   private toggleStreetPick(): void {
@@ -258,47 +298,65 @@ class EarthXRApp {
   private async setupWebXR(): Promise<void> {
     if ('xr' in navigator && navigator.xr) {
       try {
-        this.xrSupported = await navigator.xr.isSessionSupported('immersive-vr');
+        this.arSupported = await navigator.xr.isSessionSupported('immersive-ar');
       } catch {
-        this.xrSupported = false;
+        this.arSupported = false;
+      }
+      try {
+        this.vrSupported = await navigator.xr.isSessionSupported('immersive-vr');
+      } catch {
+        this.vrSupported = false;
       }
     }
-    this.desktopHud.setXRSupport(this.xrSupported, false);
+    this.desktopHud.setXRSupport(this.arSupported, this.vrSupported, false);
 
     this.renderer.xr.addEventListener('sessionstart', () => {
       this.desktopRig.position.set(0, 0, 0);
       this.camera.rotation.set(0, 0, 0);
-      this.desktopHud.setXRSupport(true, true);
+      this.desktopHud.setXRSupport(this.arSupported, this.vrSupported, true);
       this.desktopHud.setInXRSession(true);
       this.vrHud.setVisible(true);
     });
 
     this.renderer.xr.addEventListener('sessionend', () => {
       this.desktopRig.position.set(0, ANCHOR_Y_M, 0);
-      this.desktopHud.setXRSupport(this.xrSupported, false);
+      this.desktopHud.setXRSupport(this.arSupported, this.vrSupported, false);
       this.desktopHud.setInXRSession(false);
       this.vrHud.setVisible(false);
     });
   }
 
-  private async toggleXRSession(): Promise<void> {
+  private async toggleXRSession(preferPassthrough: boolean): Promise<void> {
     const active = this.renderer.xr.getSession();
     if (active) {
       await active.end();
       return;
     }
     if (!navigator.xr) {
-      this.desktopHud.showToast('Abre https://maps.dcedwin.com en el navegador de tu Meta Quest 3 para VR');
+      this.desktopHud.showToast('Abre https://maps.dcedwin.com en Meta Quest 3 para XR y Passthrough');
       return;
     }
-    try {
-      const session = await navigator.xr.requestSession('immersive-vr', {
-        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
-      });
-      await this.renderer.xr.setSession(session);
-    } catch {
-      this.desktopHud.showToast('No se detectó un visor WebXR activo en este dispositivo');
+
+    // Prefer immersive-ar on Meta Quest 3 because it allows seamless live switching
+    // between Passthrough Reality (alpha=0) and Starry Space (opaque sky dome) without restarting!
+    const tryOrder: XRSessionMode[] = this.arSupported
+      ? ['immersive-ar', 'immersive-vr']
+      : ['immersive-vr', 'immersive-ar'];
+
+    for (const sessionMode of tryOrder) {
+      try {
+        const session = await navigator.xr.requestSession(sessionMode, {
+          optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+        });
+        this.applyPassthroughState(sessionMode === 'immersive-ar' ? preferPassthrough : false);
+        await this.renderer.xr.setSession(session);
+        return;
+      } catch {
+        // try fallback mode
+      }
     }
+
+    this.desktopHud.showToast('No se detectó un visor WebXR activo en este dispositivo');
   }
 
   private setLayer(layer: MapLayer): void {
@@ -340,7 +398,7 @@ class EarthXRApp {
     lon: number,
     fallbackPanoramaxId?: string
   ): Promise<void> {
-    this.desktopHud.showToast('Buscando Street View 360° en esta calle...');
+    this.desktopHud.showToast('Buscando vista 360° cercana...');
     await this.scanStreetViewNear(lat, lon, true, fallbackPanoramaxId);
     if (this.nearbyPanoramas.length > 0) {
       await this.enterStreetView(this.nearbyPanoramas[0]);
@@ -365,12 +423,12 @@ class EarthXRApp {
     this.vrHud.updateState({
       searchingPano: true,
       nearbyPano: null,
-      statusMessage: 'Buscando Street View 360° en esta calle...',
+      statusMessage: 'Buscando vista 360°...',
     });
 
     try {
       const alt = this.globe.getState().altitudeKm;
-      const radius = this.googleEnabled
+      const radius = this.googleActive
         ? alt > 15
           ? 600
           : alt > 3
@@ -378,11 +436,11 @@ class EarthXRApp {
             : 80
         : alt > 20
           ? 2500
-          : 500;
+          : 600;
       const res = await searchPanoramasNear(lat, lon, radius, this.scanAbort.signal);
 
       let items = res.items;
-      if (!this.googleEnabled && fallbackPanoramaxId && !items.some((i) => i.id === fallbackPanoramaxId)) {
+      if (!this.googleActive && fallbackPanoramaxId && !items.some((i) => i.id === fallbackPanoramaxId)) {
         try {
           const verified = await fetchPanoramaById(
             fallbackPanoramaxId,
@@ -410,29 +468,20 @@ class EarthXRApp {
           statusMessage: `360° listo a ${formatDistance(closest.distanceMeters)}`,
         });
       } else {
-        const msg = this.googleEnabled
-          ? 'No hay Street View de Google exactamente en ese punto. Prueba una calle con línea azul.'
-          : 'Conecta tu Google Maps API Key (⚙) para abrir Street View en cualquier calle del mundo.';
+        const msg = 'Sin capturas 360° aquí · Agrega token de Mapillary o Map Tiles API en ⚙';
         this.desktopHud.updateStreetViewAvailability(null, false, msg);
         this.vrHud.updateState({
           searchingPano: false,
           nearbyPano: null,
-          statusMessage: this.googleEnabled
-            ? 'Sin Street View en este punto · Prueba una línea azul'
-            : 'Sin 360° abierta aquí · Conecta Google Maps',
+          statusMessage: 'Sin 360° en esta zona · Prueba otro destino',
         });
-        if (explicit) {
-          this.desktopHud.showToast(msg, 3600);
-        }
+        if (explicit) this.desktopHud.showToast(msg, 3400);
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
       this.searchingPano = false;
-      this.desktopHud.updateStreetViewAvailability(null, false, 'Error al consultar Street View 360°');
-      this.vrHud.updateState({
-        searchingPano: false,
-        statusMessage: 'Error de red consultando 360°',
-      });
+      this.desktopHud.updateStreetViewAvailability(null, false, 'Error consultando 360°');
+      this.vrHud.updateState({ searchingPano: false, statusMessage: 'Error de red' });
     }
   }
 
@@ -464,7 +513,7 @@ class EarthXRApp {
 
     this.xrControllers.pulseAllHaptics(0.6, 55);
     this.fadeTarget = 1;
-    await this.waitMs(190);
+    await this.waitMs(180);
 
     let fullPano = pano;
     if (pano.links.length === 0) {
@@ -496,24 +545,14 @@ class EarthXRApp {
       lat: fullPano.lat,
       lon: fullPano.lon,
       streetQuality: 'loading',
-      statusMessage: 'Cargando Street View 360°...',
+      statusMessage: 'Cargando 360°...',
     });
 
     await this.streetView.loadPanorama(fullPano, (stage) => {
       if (this.mode !== 'streetview') return;
       this.desktopHud.setMode('streetview', fullPano, stage);
-      this.vrHud.updateState({
-        streetQuality: stage,
-        statusMessage:
-          stage === 'hd'
-            ? 'Street View 360° HD 4K listo'
-            : stage === 'sd'
-              ? 'Street View 360° activo (mejorando a 4K...)'
-              : 'No se pudo cargar este panorama 360°',
-      });
-      if (stage === 'sd') {
-        this.fadeTarget = 0;
-      }
+      this.vrHud.updateState({ streetQuality: stage });
+      if (stage === 'sd') this.fadeTarget = 0;
     });
     this.fadeTarget = 0;
   }
@@ -525,7 +564,7 @@ class EarthXRApp {
     await this.waitMs(130);
 
     try {
-      const provider = this.activePanorama?.provider ?? (this.googleEnabled ? 'google' : 'panoramax');
+      const provider = this.activePanorama?.provider ?? (this.googleActive ? 'google' : 'panoramax');
       const nextPano = await fetchPanoramaById(link.id, link.collection, provider);
       this.activePanorama = nextPano;
       if (nextPano.address) this.activeLocationLabel = nextPano.address;
@@ -593,7 +632,7 @@ class EarthXRApp {
     this.vrHud.updateState({
       mode: 'globe',
       currentPano: null,
-      statusMessage: 'De regreso al planeta 3D',
+      statusMessage: 'Pellizca y mueve para girar · 2 manos para zoom',
     });
 
     this.fadeTarget = 0;
@@ -631,8 +670,7 @@ class EarthXRApp {
     const globeHit = this.globe.raycastGlobe(raycaster);
     if (globeHit) {
       const curAlt = this.globe.getState().altitudeKm;
-      // Direct Street View entry when in Street Pick Mode OR already zoomed near street level!
-      if (this.streetPickMode || (this.googleEnabled && curAlt <= 4.0)) {
+      if (this.streetPickMode || curAlt <= 3.5) {
         this.globe.flyTo(globeHit.lat, globeHit.lon, Math.min(curAlt, 0.8), 0.7, () => {
           this.openStreetViewAtCoords(globeHit.lat, globeHit.lon);
         });
@@ -690,9 +728,7 @@ class EarthXRApp {
       const dy = e.clientY - this.lastPointerPos.y;
       this.lastPointerPos = { x: e.clientX, y: e.clientY };
 
-      if (
-        Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y) > 5
-      ) {
+      if (Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y) > 5) {
         this.dragMoved = true;
       }
 
@@ -728,9 +764,7 @@ class EarthXRApp {
           if (arrow) this.stepToLink(arrow);
         } else if (this.streetPickMode) {
           const hit = this.globe.raycastGlobe(this.mouseRaycaster);
-          if (hit) {
-            this.openStreetViewAtCoords(hit.lat, hit.lon);
-          }
+          if (hit) this.openStreetViewAtCoords(hit.lat, hit.lon);
         } else {
           const markerHit = this.markers.hitTest(this.mouseRaycaster);
           if (markerHit) {
@@ -753,16 +787,14 @@ class EarthXRApp {
       const hit = this.globe.raycastGlobe(this.mouseRaycaster);
       if (!hit) return;
       const curAlt = this.globe.getState().altitudeKm;
-      if (this.googleEnabled && curAlt <= 2.5) {
+      if (curAlt <= 2.5) {
         this.openStreetViewAtCoords(hit.lat, hit.lon);
         return;
       }
       const targetAlt = curAlt > 800 ? 45 : curAlt > 8 ? 1.4 : 0.35;
       this.activeLocationLabel = 'Ubicación seleccionada';
       this.globe.flyTo(hit.lat, hit.lon, targetAlt, 1.15, () => {
-        if (targetAlt <= 15) {
-          this.scanStreetViewNear(hit.lat, hit.lon, true);
-        }
+        if (targetAlt <= 15) this.scanStreetViewNear(hit.lat, hit.lon, true);
       });
     });
 
@@ -771,8 +803,7 @@ class EarthXRApp {
       (e) => {
         e.preventDefault();
         if (this.mode === 'globe') {
-          const factor = Math.exp(e.deltaY * 0.00145);
-          this.globe.zoomByFactor(factor);
+          this.globe.zoomByFactor(Math.exp(e.deltaY * 0.00145));
         } else {
           this.camera.fov = THREE.MathUtils.clamp(this.camera.fov + e.deltaY * 0.03, 35, 82);
           this.camera.updateProjectionMatrix();
@@ -784,11 +815,8 @@ class EarthXRApp {
     window.addEventListener('keydown', (e) => {
       if (document.activeElement?.tagName === 'INPUT') return;
       if (e.key === 'Escape') {
-        if (this.mode === 'streetview') {
-          this.exitStreetView();
-        } else if (this.streetPickMode) {
-          this.toggleStreetPick();
-        }
+        if (this.mode === 'streetview') this.exitStreetView();
+        else if (this.streetPickMode) this.toggleStreetPick();
       } else if ((e.key === 's' || e.key === 'S') && this.mode === 'globe') {
         this.toggleStreetViewFromAction();
       } else if (e.key === 'ArrowUp' && this.mode === 'streetview') {
@@ -843,7 +871,7 @@ class EarthXRApp {
           this.xrControllers.setSlotHitFeedback(
             i,
             gh?.worldPoint ?? null,
-            this.streetPickMode || (this.googleEnabled && this.globe.getState().altitudeKm <= 4)
+            this.streetPickMode || this.globe.getState().altitudeKm <= 3.5
           );
         }
       }
