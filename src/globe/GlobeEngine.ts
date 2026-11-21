@@ -177,7 +177,7 @@ function buildTileGeometry(
   radialMultiplier: number
 ): { geometry: THREE.BufferGeometry; centerUnit: THREE.Vector3 } {
   const n = Math.pow(2, z);
-  const segs = z <= 3 ? 10 : z <= 6 ? 6 : 4;
+  const segs = z <= 2 ? 18 : z <= 4 ? 12 : z <= 7 ? 6 : 4;
   const lonMin = (x / n) * 360 - 180;
   const lonMax = ((x + 1) / n) * 360 - 180;
 
@@ -358,6 +358,11 @@ export class GlobeEngine {
 
   public getVisualRadiusM(): number {
     return this.visualRadiusM;
+  }
+
+  public getSurfaceRadialOffset(): number {
+    const z = this.computeDesiredZoom();
+    return 1 + (z - 2) * 0.00045 + 0.0005;
   }
 
   public setLayer(layer: MapLayer): void {
@@ -684,7 +689,7 @@ export class GlobeEngine {
     const key = this.tileManager.getKey(this.layer, z, x, y);
     if (this.activeTiles.has(key)) return;
 
-    const radialMult = 1 + (z - 2) * 0.000018;
+    const radialMult = 1 + (z - 2) * 0.00045;
     const { geometry, centerUnit } = buildTileGeometry(z, x, y, radialMult);
     const cachedTex = this.tileManager.getCached(this.layer, z, x, y);
 
@@ -694,6 +699,9 @@ export class GlobeEngine {
       transparent: !cachedTex,
       opacity: cachedTex ? 1.0 : 0.0,
       depthWrite: z === 2 || Boolean(cachedTex),
+      polygonOffset: z > 2,
+      polygonOffsetFactor: -(z - 2) * 2,
+      polygonOffsetUnits: -(z - 2) * 2,
     });
 
     const mesh = new THREE.Mesh(geometry, material);

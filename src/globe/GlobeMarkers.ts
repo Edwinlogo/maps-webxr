@@ -68,10 +68,21 @@ function createLabelSprite(text: string): THREE.Sprite {
     depthTest: false,
   });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(0.24, 0.058, 1);
+  sprite.scale.set(0.185, 0.045, 1);
   sprite.renderOrder = 32;
   return sprite;
 }
+
+const ORBIT_PRIMARY_IDS = new Set([
+  'eiffel',
+  'nyc',
+  'tokyo',
+  'sf',
+  'buenosaires',
+  'taipei',
+  'andes',
+  'madrid',
+]);
 
 export class GlobeMarkers {
   public readonly group = new THREE.Group();
@@ -232,7 +243,7 @@ export class GlobeMarkers {
       node.group.visible = visible;
       if (!visible) continue;
 
-      globe.unitToGlobeLocal(node.unitVec, 1.0004, node.group.position);
+      globe.unitToGlobeLocal(node.unitVec, globe.getSurfaceRadialOffset(), node.group.position);
 
       const isHovered = this.hoveredId === node.landmark.id;
       const baseScale = isHovered ? 1.45 : 1.0;
@@ -243,7 +254,8 @@ export class GlobeMarkers {
       (node.ringMesh.material as THREE.MeshBasicMaterial).opacity =
         (1 - ((elapsedSec * 0.9 + i * 0.17) % 1)) * 0.85;
 
-      node.labelSprite.visible = showLabels || isHovered;
+      const showOrbitLabel = altKm < 7500 || ORBIT_PRIMARY_IDS.has(node.landmark.id);
+      node.labelSprite.visible = (showLabels && showOrbitLabel) || isHovered;
     }
 
     const showPanos = altKm < 60;
@@ -255,7 +267,7 @@ export class GlobeMarkers {
         node.group.visible = facing > 0.5;
         if (!node.group.visible) continue;
 
-        globe.unitToGlobeLocal(node.unitVec, 1.0005, node.group.position);
+        globe.unitToGlobeLocal(node.unitVec, globe.getSurfaceRadialOffset() + 0.0001, node.group.position);
         const isHovered = this.hoveredId === node.panorama.id;
         node.group.scale.setScalar(isHovered ? 1.5 : 1.05);
 
