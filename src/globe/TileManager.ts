@@ -16,33 +16,49 @@ interface PendingTask {
   layer: MapLayer;
   useGoogle: boolean;
   withSvOverlay: boolean;
+  includeOverlays: boolean;
   priority: number;
   callbacks: Array<(tex: THREE.Texture | null) => void>;
 }
 
-const MAX_CACHE_ENTRIES = 210;
-const MAX_CONCURRENT = 6;
+const MAX_CACHE_ENTRIES = 320;
+const MAX_CONCURRENT = 8;
 
 function esriSatelliteUrl(z: number, x: number, y: number): string {
   return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
 }
 
-function esriLabelsUrl(z: number, x: number, y: number): string {
+function esriPlacesUrl(z: number, x: number, y: number): string {
   return `https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/${z}/${y}/${x}`;
+}
+
+function esriRoadsUrl(z: number, x: number, y: number): string {
+  return `https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/${z}/${y}/${x}`;
 }
 
 function cartoStreetsUrl(z: number, x: number, y: number): string {
   const sub = ['a', 'b', 'c', 'd'][(x + y) & 3];
-  return `https://${sub}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`;
+  return `https://${sub}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}@2x.png`;
 }
 
-function loadImage(url: string): Promise<HTMLImageElement> {
+function loadImage(url: string, timeoutMs = 7000): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.decoding = 'async';
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`Failed to load tile: ${url}`));
+    const timer = window.setTimeout(() => {
+      img.onload = null;
+      img.onerror = null;
+      reject(new Error(`Tile timeout: ${url}`));
+    }, timeoutMs);
+    img.onload = () => {
+      window.clearTimeout(timer);
+      resolve(img);
+    };
+    img.onerror = () => {
+      window.clearTimeout(timer);
+      reject(new Error(`Tile load error: ${url}`));
+    };
     img.src = url;
   });
 }
@@ -54,8 +70,8 @@ export class TileManager {
   private tick = 0;
   private anisotropy: number;
 
-  constructor(maxAnisotropy = 4) {
-    this.anisotropy = Math.min(4, Math.max(1, maxAnisotropy));
+  constructor(maxAnisotropy = 8) {
+    this.anisotropy = Math.min(8, Math.max(2, maxAnisotropy));
   }
 
   public getKey(
@@ -92,6 +108,7 @@ export class TileManager {
     y: number,
     useGoogle: boolean,
     withSvOverlay: boolean,
+    includeOverlays: boolean,
     priority: number,
     onLoaded: (tex: THREE.Texture | null) => void
   ): void {
@@ -118,9 +135,13 @@ export class TileManager {
       layer,
       useGoogle,
       withSvOverlay,
+      includeOverlays,
       priority,
       callbacks: [onLoaded],
     });
+  }
+
+  public flushQueue(): void {
     this.pump();
   }
 
@@ -155,7 +176,13 @@ export class TileManager {
     }
   }
 
-  private async fetchFallbackTexture(layer: MapLayer, z: number, x: number, y: number): Promise<THREE.Texture> {
+  private async fetchOpenTexture(
+    layer: MapLayer,
+    z: number,
+    x: number,
+    y: number,
+    includeOverlays: boolean
+  ): Promise<THREE.Texture> {
     if (layer === 'satellite') {
       const img = await loadImage(esriSatelliteUrl(z, x, y));
       return new THREE.Texture(img);
@@ -164,17 +191,35 @@ export class TileManager {
       const img = await loadImage(cartoStreetsUrl(z, x, y));
       return new THREE.Texture(img);
     }
-    const [satImg, lblImg] = await Promise.all([
+
+    // Hybrid Google Earth style: sharp satellite + place names + street roads when zoomed in!
+    if (!includeOverlays) {
+      const img = await loadImage(esriSatelliteUrl(z, x, y));
+      return new THREE.Texture(img);
+    }
+
+    const includeRoads = z >= 12;
+    const [satImg, placesImg, roadsImg] = await Promise.all([
       loadImage(esriSatelliteUrl(z, x, y)),
-      loadImage(esriLabelsUrl(z, x, y)).catch(() => null),
+      loadImage(esriPlacesUrl(z, x, y), 3000).catch(() => null),
+      includeRoads ? loadImage(esriRoadsUrl(z, x, y), 3000).catch(() => null) : Promise.resolve(null),
     ]);
+
+    const size = Math.max(256, satImg.naturalWidth || 256);
     const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 256;
+    canvas.width = size;
+    canvas.height = size;
     const ctx = canvas.getContext('2d');
     if (ctx) {
-      ctx.drawImage(satImg, 0, 0, 256, 256);
-      if (lblImg) ctx.drawImage(lblImg, 0, 0, 256, 256);
+      ctx.drawImage(satImg, 0, 0, size, size);
+      if (roadsImg) {
+        ctx.globalAlpha = 0.72;
+        ctx.drawImage(roadsImg, 0, 0, size, size);
+        ctx.globalAlpha = 1.0;
+      }
+      if (placesImg) {
+        ctx.drawImage(placesImg, 0, 0, size, size);
+      }
     }
     return new THREE.CanvasTexture(canvas);
   }
@@ -186,20 +231,20 @@ export class TileManager {
       if (task.useGoogle) {
         try {
           if (task.withSvOverlay && task.z >= 7) {
-            // Composite Google base tile + official Google Blue Street View coverage lines in 1 texture!
             const [baseImg, svImg] = await Promise.all([
               loadImage(google2DTileUrl(task.layer, task.z, task.x, task.y)),
-              loadImage(google2DTileUrl('sv-overlay', task.z, task.x, task.y)).catch(() => null),
+              loadImage(google2DTileUrl('sv-overlay', task.z, task.x, task.y), 3500).catch(() => null),
             ]);
+            const size = Math.max(256, baseImg.naturalWidth || 256);
             const canvas = document.createElement('canvas');
-            canvas.width = 256;
-            canvas.height = 256;
+            canvas.width = size;
+            canvas.height = size;
             const ctx = canvas.getContext('2d');
             if (ctx) {
-              ctx.drawImage(baseImg, 0, 0, 256, 256);
+              ctx.drawImage(baseImg, 0, 0, size, size);
               if (svImg && svImg.naturalWidth > 2) {
                 ctx.globalAlpha = 0.88;
-                ctx.drawImage(svImg, 0, 0, 256, 256);
+                ctx.drawImage(svImg, 0, 0, size, size);
                 ctx.globalAlpha = 1.0;
               }
             }
@@ -209,10 +254,22 @@ export class TileManager {
             texture = new THREE.Texture(img);
           }
         } catch {
-          texture = await this.fetchFallbackTexture(task.layer, task.z, task.x, task.y);
+          texture = await this.fetchOpenTexture(
+            task.layer,
+            task.z,
+            task.x,
+            task.y,
+            task.includeOverlays
+          );
         }
       } else {
-        texture = await this.fetchFallbackTexture(task.layer, task.z, task.x, task.y);
+        texture = await this.fetchOpenTexture(
+          task.layer,
+          task.z,
+          task.x,
+          task.y,
+          task.includeOverlays
+        );
       }
 
       texture.colorSpace = THREE.SRGBColorSpace;

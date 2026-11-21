@@ -243,7 +243,7 @@ export class GlobeMarkers {
       node.group.visible = visible;
       if (!visible) continue;
 
-      globe.unitToGlobeLocal(node.unitVec, globe.getSurfaceRadialOffset(), node.group.position);
+      globe.unitToGlobeLocal(node.unitVec, 0.007, node.group.position);
 
       const isHovered = this.hoveredId === node.landmark.id;
       const baseScale = isHovered ? 1.45 : 1.0;
@@ -267,7 +267,7 @@ export class GlobeMarkers {
         node.group.visible = facing > 0.5;
         if (!node.group.visible) continue;
 
-        globe.unitToGlobeLocal(node.unitVec, globe.getSurfaceRadialOffset() + 0.0001, node.group.position);
+        globe.unitToGlobeLocal(node.unitVec, 0.008, node.group.position);
         const isHovered = this.hoveredId === node.panorama.id;
         node.group.scale.setScalar(isHovered ? 1.5 : 1.05);
 

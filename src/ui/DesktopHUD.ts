@@ -31,6 +31,8 @@ export interface DesktopHUDCallbacks {
   onTogglePassthrough: () => void;
   onToggleSvOverlay: () => void;
   onToggleStreetPick: () => void;
+  onToggleTilt3D: () => void;
+  onResetNorth: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onResetGlobe: () => void;
@@ -138,7 +140,9 @@ export class DesktopHUD {
       <div class="zoom-stack glass" id="zoom-stack">
         <button id="btn-zoom-in" title="Acercar">+</button>
         <button id="btn-zoom-out" title="Alejar">−</button>
-        <button id="btn-reset" title="Vista completa">🌍</button>
+        <button id="btn-tilt-3d" class="active-ctrl" title="Alternar inclinación 3D / 2D (clic derecho para inclinar)">3D</button>
+        <button id="btn-north" title="Orientar al Norte">N</button>
+        <button id="btn-reset" title="Vista completa del planeta">🌍</button>
       </div>
 
       <footer class="hud-bottom">
@@ -150,11 +154,11 @@ export class DesktopHUD {
         <div class="sv-card glass" id="sv-card">
           <img class="sv-thumb hidden" id="sv-thumb" alt="Vista previa 360°" />
           <div class="sv-info">
-            <div class="sv-title" id="sv-title">Street View 360°</div>
-            <div class="sv-meta" id="sv-meta">Acércate a una ciudad o pulsa buscar</div>
+            <div class="sv-title" id="sv-title">Vista 360°</div>
+            <div class="sv-meta" id="sv-meta">Acércate a una ciudad o pulsa explorar</div>
             <div class="sv-walk-bar hidden" id="sv-walk-bar"></div>
           </div>
-          <button class="sv-btn" id="sv-action-btn">360° aquí</button>
+          <button class="sv-btn" id="sv-action-btn">Vista 360°</button>
         </div>
       </footer>
 
@@ -179,19 +183,19 @@ export class DesktopHUD {
                 <button class="layer-btn" data-layer="streets">Calles</button>
               </div>
               <label class="switch-row">
-                <span>Modo Clic en Calle → Street View 360°</span>
+                <span>Modo Clic en Calle → Vista 360°</span>
                 <input type="checkbox" id="chk-street-pick" />
               </label>
               <label class="switch-row">
-                <span>Mostrar líneas azules 360° (cuando Map Tiles API está activa)</span>
+                <span>Mostrar líneas azules de cobertura (cuando Google Map Tiles está activa)</span>
                 <input type="checkbox" id="chk-sv-lines" checked />
               </label>
             </section>
 
             <section class="cfg-section">
-              <h4>Street View por defecto: Panoramax + Mapillary (Gratis, sin tarjeta)</h4>
+              <h4>Vista 360° por defecto: Panoramax + Mapillary (Gratis, sin tarjeta)</h4>
               <p class="cfg-help">
-                <b>Panoramax</b> funciona automáticamente sin clave. Agrega tu <b>Client Token gratuito de Mapillary</b> (Meta) para sumar millones de fotos 360° en Colombia, Latinoamérica y todo el mundo.
+                <b>Panoramax</b> funciona automáticamente sin clave. Agrega tu <b>Client Token gratuito de Mapillary</b> (Meta) para sumar millones de panoramas 360° en Colombia, Latinoamérica y todo el mundo.
               </p>
               <div class="token-row">
                 <input id="mapillary-token" type="password" placeholder="MLY|..." value="${getMapillaryToken()}" />
@@ -208,7 +212,7 @@ export class DesktopHUD {
                 </label>
               </div>
               <p class="cfg-help">
-                Solo usa <b>Map Tiles API</b> (100,000 solicitudes/mes gratis para 2D y 100,000 para Street View). <b>Nunca activa ni llama a Geocoding API</b> (las búsquedas siempre usan OpenStreetMap gratis).
+                Solo usa <b>Map Tiles API</b> (mapas satelitales de Google + Google Street View oficial). <b>Nunca activa ni llama a Geocoding API</b> (las búsquedas siempre usan OpenStreetMap gratis).
               </p>
               <div class="token-row">
                 <input id="google-maps-key" type="password" placeholder="AIzaSy..." value="${getGoogleMapsKey()}" />
@@ -218,13 +222,13 @@ export class DesktopHUD {
             </section>
 
             <section class="cfg-section gestures-box">
-              <h4>Meta Quest 3 · Gestos sin controles (Hand Tracking)</h4>
+              <h4>Controles y Gestos sin mandos (Meta Quest 3)</h4>
               <ul>
-                <li><b>Pellizcar + Mover (1 mano):</b> Rotar el planeta o girar la vista 360° de Street View</li>
-                <li><b>Spread / Pinch-out (2 manos pellizcando):</b> Separar manos = acercar zoom · Juntar = alejar</li>
-                <li><b>Pellizco corto (tap):</b> Seleccionar botón, flecha de calle o pin 360°</li>
-                <li><b>Mover tablero 3D:</b> Pellizca la barra superior <code>⠿</code> del panel y colócalo donde quieras</li>
+                <li><b>Pellizcar + Mover (1 mano):</b> Rotar el planeta o girar la Vista 360°</li>
+                <li><b>Spread / Pinch-out (2 manos pellizcando):</b> Separar manos = acercar · Juntar = alejar</li>
+                <li><b>Mover tablero 3D:</b> Pellizca la barra superior <code>⠿</code> del panel y ubícalo donde quieras</li>
                 <li><b>Realidad (Passthrough):</b> Toca <code>👁 Realidad</code> en el tablero 3D para ver tu habitación real</li>
+                <li><b>Escritorio:</b> Rueda = zoom al cursor · Clic derecho + arrastrar = inclinar 3D y girar brújula</li>
               </ul>
             </section>
           </div>
@@ -286,6 +290,8 @@ export class DesktopHUD {
     this.passthroughBtn.addEventListener('click', () => this.callbacks.onTogglePassthrough());
     this.root.querySelector('#btn-zoom-in')?.addEventListener('click', () => this.callbacks.onZoomIn());
     this.root.querySelector('#btn-zoom-out')?.addEventListener('click', () => this.callbacks.onZoomOut());
+    this.root.querySelector('#btn-tilt-3d')?.addEventListener('click', () => this.callbacks.onToggleTilt3D());
+    this.root.querySelector('#btn-north')?.addEventListener('click', () => this.callbacks.onResetNorth());
     this.root.querySelector('#btn-reset')?.addEventListener('click', () => this.callbacks.onResetGlobe());
     this.xrBtn.addEventListener('click', () => this.callbacks.onRequestXR(this.passthroughMode));
 
@@ -495,6 +501,14 @@ export class DesktopHUD {
     }`;
   }
 
+  public setTilt3DActive(active: boolean): void {
+    const btn = this.root.querySelector('#btn-tilt-3d');
+    if (btn) {
+      btn.textContent = active ? '3D' : '2D';
+      btn.classList.toggle('active-ctrl', active);
+    }
+  }
+
   public setMode(mode: AppMode, activePano?: PanoramaItem | null, quality?: 'loading' | 'sd' | 'hd' | 'error'): void {
     this.currentMode = mode;
     const isSV = mode === 'streetview';
@@ -503,7 +517,8 @@ export class DesktopHUD {
     if (isSV && activePano) {
       this.svCardEl.classList.add('ready');
       this.svThumbEl.classList.add('hidden');
-      this.svTitleEl.textContent = activePano.address || 'Street View 360°';
+      const modeName = activePano.provider === 'google' ? 'Google Street View' : 'Vista 360°';
+      this.svTitleEl.textContent = activePano.address || modeName;
       const qLabel =
         quality === 'hd' ? 'HD' : quality === 'sd' ? 'Cargando HD...' : quality === 'error' ? 'Error' : 'Cargando...';
       const prov =
@@ -577,18 +592,19 @@ export class DesktopHUD {
         this.svThumbEl.src = thumb;
         this.svThumbEl.classList.remove('hidden');
       }
-      this.svTitleEl.textContent = pano.address || 'Street View 360° listo';
+      this.svTitleEl.textContent =
+        pano.address || (pano.provider === 'google' ? 'Google Street View listo' : 'Vista 360° lista');
       const provTag =
-        pano.provider === 'google' ? 'Google' : pano.provider === 'mapillary' ? 'Mapillary' : 'Panoramax';
+        pano.provider === 'google' ? 'Google Street View' : pano.provider === 'mapillary' ? 'Mapillary' : 'Panoramax';
       this.svMetaEl.textContent = `${provTag} · a ${formatDistance(pano.distanceMeters)}`;
-      this.svActionBtn.textContent = 'Entrar 360°';
+      this.svActionBtn.textContent = pano.provider === 'google' ? 'Street View' : 'Vista 360°';
       this.svActionBtn.classList.add('emerald');
     } else {
       this.svCardEl.classList.remove('ready');
       this.svThumbEl.classList.add('hidden');
-      this.svTitleEl.textContent = 'Street View 360°';
+      this.svTitleEl.textContent = 'Vista 360°';
       this.svMetaEl.textContent = hintText ?? 'Acércate a una calle para explorar en 360°';
-      this.svActionBtn.textContent = '360° aquí';
+      this.svActionBtn.textContent = 'Vista 360°';
       this.svActionBtn.classList.remove('emerald');
     }
   }

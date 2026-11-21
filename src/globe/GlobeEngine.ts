@@ -40,7 +40,7 @@ interface FlyAnimation {
   onComplete?: () => void;
 }
 
-export const MIN_ALTITUDE_KM = 0.14;
+export const MIN_ALTITUDE_KM = 0.12;
 export const MAX_ALTITUDE_KM = 17500;
 export const FOCUS_DIST_M = 2.05;
 export const ANCHOR_Y_M = 1.38;
@@ -63,11 +63,11 @@ const ATMOSPHERE_FRAGMENT = /* glsl */ `
   void main() {
     vec3 viewDir = normalize(vViewPos);
     float ndotv = clamp(dot(normalize(vNormal), viewDir), 0.0, 1.0);
-    float fresnel = pow(1.0 - ndotv, 2.8);
-    vec3 innerCol = vec3(0.24, 0.65, 1.0);
-    vec3 outerCol = vec3(0.45, 0.85, 1.0);
+    float fresnel = pow(1.0 - ndotv, 2.75);
+    vec3 innerCol = vec3(0.22, 0.62, 1.0);
+    vec3 outerCol = vec3(0.46, 0.86, 1.0);
     vec3 col = mix(innerCol, outerCol, fresnel);
-    float alpha = fresnel * 0.78 * uOpacity;
+    float alpha = fresnel * 0.82 * uOpacity;
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -165,14 +165,17 @@ function createStarfield(): THREE.Points {
   return new THREE.Points(geo, mat);
 }
 
+/**
+ * Builds an exact unit-sphere (r = 1.0) Mercator-projected patch centered around its float64 centerUnit.
+ * Keeping r = 1.0 strictly prevents radial blow-up at street-level zoom (when visualRadiusM > 50,000 m)!
+ */
 function buildTileGeometry(
   z: number,
   x: number,
-  y: number,
-  radialMultiplier: number
+  y: number
 ): { geometry: THREE.BufferGeometry; centerUnit: THREE.Vector3 } {
   const n = Math.pow(2, z);
-  const segs = z <= 2 ? 18 : z <= 4 ? 12 : z <= 7 ? 6 : 4;
+  const segs = z <= 2 ? 22 : z <= 3 ? 14 : z <= 5 ? 8 : z <= 8 ? 5 : 3;
   const lonMin = (x / n) * 360 - 180;
   const lonMax = ((x + 1) / n) * 360 - 180;
 
@@ -199,9 +202,9 @@ function buildTileGeometry(
       const lon = lonMin + (lonMax - lonMin) * u;
       const lam = lon * DEG2RAD;
 
-      const px = cosPhi * Math.sin(lam) * radialMultiplier;
-      const py = sinPhi * radialMultiplier;
-      const pz = cosPhi * Math.cos(lam) * radialMultiplier;
+      const px = cosPhi * Math.sin(lam);
+      const py = sinPhi;
+      const pz = cosPhi * Math.cos(lam);
 
       positions[vi++] = px - centerUnit.x;
       positions[vi++] = py - centerUnit.y;
@@ -260,6 +263,7 @@ export class GlobeEngine {
   private layer: MapLayer = 'hybrid';
   private useGoogle = false;
   private showSvOverlay = true;
+  private is3DTiltEnabled = true;
   private flyAnim: FlyAnimation | null = null;
   private anchorUnit = new THREE.Vector3(0, 0, 1);
   private visualRadiusM = 0.95;
@@ -274,11 +278,9 @@ export class GlobeEngine {
   private readonly axisY = new THREE.Vector3(0, 1, 0);
   private readonly axisZ = new THREE.Vector3(0, 0, 1);
 
-  constructor(maxAnisotropy = 4) {
+  constructor(maxAnisotropy = 8) {
     this.tileManager = new TileManager(maxAnisotropy);
 
-    // Opaque deep-space sky dome: occludes Meta Quest 3 Passthrough when in Stars mode,
-    // and hides cleanly when toggled to Passthrough (Reality) mode without restarting WebXR!
     const skyGeo = new THREE.SphereGeometry(290, 32, 24);
     const skyMat = new THREE.MeshBasicMaterial({
       color: 0x030712,
@@ -296,17 +298,22 @@ export class GlobeEngine {
     this.root.add(this.globeGroup);
     this.globeGroup.add(this.tileGroup);
 
-    const coreGeo = new THREE.SphereGeometry(0.9988, 48, 36);
-    const coreMat = new THREE.MeshBasicMaterial({ color: 0x09182e });
+    const coreGeo = new THREE.SphereGeometry(0.999, 48, 36);
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0x09182e,
+      depthWrite: false,
+      transparent: true,
+      opacity: 1.0,
+    });
     this.coreSphere = new THREE.Mesh(coreGeo, coreMat);
-    this.coreSphere.renderOrder = 0;
+    this.coreSphere.renderOrder = 1;
     this.globeGroup.add(this.coreSphere);
 
-    const cloudGeo = new THREE.SphereGeometry(1.009, 48, 36);
+    const cloudGeo = new THREE.SphereGeometry(1.008, 48, 36);
     this.cloudMat = new THREE.MeshBasicMaterial({
       map: createCloudTexture(),
       transparent: true,
-      opacity: 0.38,
+      opacity: 0.36,
       depthWrite: false,
     });
     this.cloudMesh = new THREE.Mesh(cloudGeo, this.cloudMat);
@@ -327,7 +334,7 @@ export class GlobeEngine {
     this.atmosphereMesh.renderOrder = 24;
     this.globeGroup.add(this.atmosphereMesh);
 
-    const reticleGeo = new THREE.RingGeometry(0.028, 0.036, 40);
+    const reticleGeo = new THREE.RingGeometry(0.022, 0.029, 40);
     const reticleMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
       transparent: true,
@@ -336,7 +343,7 @@ export class GlobeEngine {
       depthTest: false,
     });
     this.reticleRing = new THREE.Mesh(reticleGeo, reticleMat);
-    this.reticleRing.position.set(0, ANCHOR_Y_M, -FOCUS_DIST_M + 0.015);
+    this.reticleRing.position.set(0, ANCHOR_Y_M, -FOCUS_DIST_M + 0.02);
     this.reticleRing.renderOrder = 30;
     this.root.add(this.reticleRing);
 
@@ -360,17 +367,16 @@ export class GlobeEngine {
     return this.showSvOverlay;
   }
 
+  public isTilt3DEnabled(): boolean {
+    return this.is3DTiltEnabled;
+  }
+
   public getAnchorUnit(): THREE.Vector3 {
     return this.anchorUnit;
   }
 
   public getVisualRadiusM(): number {
     return this.visualRadiusM;
-  }
-
-  public getSurfaceRadialOffset(): number {
-    const z = this.computeDesiredZoom();
-    return 1 + (z - 2) * 0.00045 + 0.0005;
   }
 
   public setPassthroughMode(enabled: boolean): void {
@@ -398,6 +404,37 @@ export class GlobeEngine {
     this.reloadAllTiles(false);
   }
 
+  public toggle3DTilt(): boolean {
+    this.is3DTiltEnabled = !this.is3DTiltEnabled;
+    if (!this.is3DTiltEnabled) {
+      this.targetState.tiltDeg = 0;
+    } else if (this.state.altitudeKm < 60) {
+      this.targetState.tiltDeg = 32;
+    }
+    return this.is3DTiltEnabled;
+  }
+
+  public adjustTilt(deltaDeg: number): void {
+    this.isSpinningIdle = false;
+    this.is3DTiltEnabled = true;
+    this.targetState.tiltDeg = THREE.MathUtils.clamp(this.targetState.tiltDeg + deltaDeg, 0, 56);
+  }
+
+  public resetNorth(): void {
+    this.targetState.headingDeg = 0;
+  }
+
+  public setImmediatePosition(lat: number, lon: number, altitudeKm: number): void {
+    this.isSpinningIdle = false;
+    this.flyAnim = null;
+    this.state.lat = clampLat(lat);
+    this.state.lon = wrapLon(lon);
+    this.state.altitudeKm = THREE.MathUtils.clamp(altitudeKm, MIN_ALTITUDE_KM, MAX_ALTITUDE_KM);
+    this.targetState = { ...this.state };
+    this.applyGlobeTransform();
+    this.syncTiles(true);
+  }
+
   public reloadAllTiles(clearCache: boolean): void {
     if (clearCache) {
       this.tileManager.clearCache();
@@ -418,18 +455,31 @@ export class GlobeEngine {
   public panByDegrees(dLat: number, dLon: number): void {
     this.isSpinningIdle = false;
     this.flyAnim = null;
-    this.targetState.lat = clampLat(this.targetState.lat + dLat);
-    this.targetState.lon = wrapLon(this.targetState.lon + dLon);
+    // Account for camera heading so dragging always aligns with screen directions
+    const hRad = this.state.headingDeg * DEG2RAD;
+    const cosH = Math.cos(hRad);
+    const sinH = Math.sin(hRad);
+    const rotLat = dLat * cosH - dLon * sinH;
+    const rotLon = dLat * sinH + dLon * cosH;
+    this.targetState.lat = clampLat(this.targetState.lat + rotLat);
+    this.targetState.lon = wrapLon(this.targetState.lon + rotLon);
   }
 
-  public zoomByFactor(factor: number): void {
+  public zoomByFactor(factor: number, towardLat?: number, towardLon?: number): void {
     this.isSpinningIdle = false;
     this.flyAnim = null;
-    this.targetState.altitudeKm = THREE.MathUtils.clamp(
-      this.targetState.altitudeKm * factor,
-      MIN_ALTITUDE_KM,
-      MAX_ALTITUDE_KM
-    );
+    const prevAlt = this.targetState.altitudeKm;
+    const nextAlt = THREE.MathUtils.clamp(prevAlt * factor, MIN_ALTITUDE_KM, MAX_ALTITUDE_KM);
+    this.targetState.altitudeKm = nextAlt;
+
+    // Google Earth-style zoom toward cursor point when zooming in
+    if (factor < 1 && typeof towardLat === 'number' && typeof towardLon === 'number') {
+      const pull = THREE.MathUtils.clamp((1 - factor) * 0.55, 0, 0.28);
+      this.targetState.lat = clampLat(this.targetState.lat + (towardLat - this.targetState.lat) * pull);
+      this.targetState.lon = wrapLon(
+        this.targetState.lon + shortestLonDelta(this.targetState.lon, towardLon) * pull
+      );
+    }
   }
 
   public rotateHeading(deltaDeg: number): void {
@@ -440,6 +490,7 @@ export class GlobeEngine {
   public resetView(): void {
     this.flyTo(16, -52, 13800, 1.5);
     this.targetState.headingDeg = 0;
+    this.targetState.tiltDeg = 0;
   }
 
   public flyTo(
@@ -478,16 +529,26 @@ export class GlobeEngine {
     this.targetState.altitudeKm = clampedAlt;
   }
 
-  public unitToGlobeLocal(unitVec: THREE.Vector3, radialOffset = 1.0, out = new THREE.Vector3()): THREE.Vector3 {
+  /**
+   * Projects a unit sphere vector into globeGroup local space with a fixed world-space lift (meters),
+   * never scaled by visualRadiusM — guarantees pins stay glued to streets at every zoom level!
+   */
+  public unitToGlobeLocal(
+    unitVec: THREE.Vector3,
+    worldLiftMeters = 0.008,
+    out = new THREE.Vector3()
+  ): THREE.Vector3 {
     out.set(
-      (unitVec.x * radialOffset - this.anchorUnit.x) * this.visualRadiusM,
-      (unitVec.y * radialOffset - this.anchorUnit.y) * this.visualRadiusM,
-      (unitVec.z * radialOffset - this.anchorUnit.z) * this.visualRadiusM
+      (unitVec.x - this.anchorUnit.x) * this.visualRadiusM + unitVec.x * worldLiftMeters,
+      (unitVec.y - this.anchorUnit.y) * this.visualRadiusM + unitVec.y * worldLiftMeters,
+      (unitVec.z - this.anchorUnit.z) * this.visualRadiusM + unitVec.z * worldLiftMeters
     );
     return out;
   }
 
-  public raycastGlobe(raycaster: THREE.Raycaster): { lat: number; lon: number; worldPoint: THREE.Vector3 } | null {
+  public raycastGlobe(
+    raycaster: THREE.Raycaster
+  ): { lat: number; lon: number; worldPoint: THREE.Vector3 } | null {
     const centerWorld = this.anchorUnit.clone().multiplyScalar(-this.visualRadiusM);
     this.globeGroup.localToWorld(centerWorld);
     const sphere = new THREE.Sphere(centerWorld, this.visualRadiusM);
@@ -535,7 +596,7 @@ export class GlobeEngine {
       }
     } else {
       if (this.isSpinningIdle && this.state.altitudeKm > 7000) {
-        this.targetState.lon = wrapLon(this.targetState.lon + safeDt * 2.2);
+        this.targetState.lon = wrapLon(this.targetState.lon + safeDt * 2.0);
       }
 
       const smooth = 1 - Math.exp(-9.5 * safeDt);
@@ -552,34 +613,39 @@ export class GlobeEngine {
       this.state.headingDeg += dH * smooth;
     }
 
+    // Google Earth automatic gentle 3D perspective tilt as you descend over a city
+    const autoTiltTarget = this.is3DTiltEnabled
+      ? (1 - THREE.MathUtils.smoothstep(this.state.altitudeKm, 1.0, 45)) * 28
+      : 0;
+    const desiredTilt = Math.max(autoTiltTarget, this.targetState.tiltDeg);
+    const tiltSmooth = 1 - Math.exp(-7 * safeDt);
+    this.state.tiltDeg += (desiredTilt - this.state.tiltDeg) * tiltSmooth;
+
     this.applyGlobeTransform();
 
     this.cloudMesh.rotation.y = elapsedSec * 0.008;
     const cloudFade = THREE.MathUtils.smoothstep(this.state.altitudeKm, 900, 3800);
-    this.cloudMat.opacity = 0.36 * cloudFade;
+    this.cloudMat.opacity = 0.34 * cloudFade;
     this.cloudMesh.visible = cloudFade > 0.01;
 
     const atmoFade = THREE.MathUtils.smoothstep(this.state.altitudeKm, 450, 2600);
     this.atmosphereMat.uniforms.uOpacity.value = atmoFade;
     this.atmosphereMesh.visible = atmoFade > 0.01;
 
-    const reticleFade = 1 - THREE.MathUtils.smoothstep(this.state.altitudeKm, 25, 180);
+    const reticleFade = 1 - THREE.MathUtils.smoothstep(this.state.altitudeKm, 20, 140);
     const reticleMat = this.reticleRing.material as THREE.MeshBasicMaterial;
-    reticleMat.opacity = reticleFade * (0.45 + 0.18 * Math.sin(elapsedSec * 3.2));
+    reticleMat.opacity = reticleFade * (0.4 + 0.16 * Math.sin(elapsedSec * 3.2));
     this.reticleRing.visible = reticleFade > 0.02;
-    this.reticleRing.scale.setScalar(1 + 0.08 * Math.sin(elapsedSec * 3.2));
+    this.reticleRing.scale.setScalar(1 + 0.07 * Math.sin(elapsedSec * 3.2));
 
     for (const entry of this.activeTiles.values()) {
       if (entry.loaded && entry.fade < 1) {
-        entry.fade = Math.min(1, entry.fade + safeDt * 5.0);
+        entry.fade = Math.min(1, entry.fade + safeDt * 7.5);
         entry.material.opacity = entry.fade;
-        if (entry.fade >= 1) {
-          entry.material.transparent = false;
-        }
       }
     }
 
-    if (elapsedSec - this.lastTileSyncTime > 0.14) {
+    if (elapsedSec - this.lastTileSyncTime > 0.1) {
       this.lastTileSyncTime = elapsedSec;
       this.syncTiles(false);
     }
@@ -592,9 +658,7 @@ export class GlobeEngine {
     this.tmpQuatY.setFromAxisAngle(this.axisY, -this.state.lon * DEG2RAD);
     this.tmpQuatX.setFromAxisAngle(this.axisX, this.state.lat * DEG2RAD);
     this.tmpQuatH.setFromAxisAngle(this.axisZ, this.state.headingDeg * DEG2RAD);
-
-    const autoTilt = (1 - THREE.MathUtils.smoothstep(this.state.altitudeKm, 1.5, 45)) * 10;
-    this.tmpQuatT.setFromAxisAngle(this.axisX, -autoTilt * DEG2RAD);
+    this.tmpQuatT.setFromAxisAngle(this.axisX, -this.state.tiltDeg * DEG2RAD);
 
     this.globeGroup.quaternion
       .copy(this.tmpQuatT)
@@ -626,8 +690,9 @@ export class GlobeEngine {
   }
 
   private computeDesiredZoom(): number {
-    const cosLat = Math.max(0.25, Math.cos(this.state.lat * DEG2RAD));
-    const rawZ = Math.log2((40075 * cosLat) / (this.state.altitudeKm * 0.42));
+    const cosLat = Math.max(0.2, Math.cos(this.state.lat * DEG2RAD));
+    // Crisp Google Earth tile resolution (~6-8 tiles across viewport)
+    const rawZ = Math.log2((40075 * cosLat) / (this.state.altitudeKm * 0.2));
     return THREE.MathUtils.clamp(Math.round(rawZ), 2, 18);
   }
 
@@ -635,16 +700,21 @@ export class GlobeEngine {
     const targetZ = this.computeDesiredZoom();
     const desiredKeys = new Set<string>();
 
-    const addRing = (z: number, halfSpan: number, basePriority: number) => {
+    const addRing = (
+      z: number,
+      halfSpan: number,
+      basePriority: number,
+      includeOverlays: boolean
+    ) => {
       const n = Math.pow(2, z);
-      const withSv = this.useGoogle && this.showSvOverlay && z >= 7;
+      const withSv = this.useGoogle && this.showSvOverlay && z >= 7 && includeOverlays;
 
       if (z === 2) {
         for (let y = 0; y < n; y++) {
           for (let x = 0; x < n; x++) {
             const key = this.tileManager.getKey(this.layer, z, x, y, this.useGoogle, false);
             desiredKeys.add(key);
-            this.ensureTileMesh(z, x, y, false, basePriority);
+            this.ensureTileMesh(z, x, y, false, includeOverlays, basePriority);
           }
         }
         return;
@@ -660,22 +730,25 @@ export class GlobeEngine {
           if (dist > halfSpan + 0.55) continue;
           const key = this.tileManager.getKey(this.layer, z, tx, ty, this.useGoogle, withSv);
           desiredKeys.add(key);
-          this.ensureTileMesh(z, tx, ty, withSv, basePriority + dist);
+          this.ensureTileMesh(z, tx, ty, withSv, includeOverlays, basePriority + dist);
         }
       }
     };
 
-    addRing(2, 2, 100);
-
-    if (targetZ >= 5) {
-      const midZ = Math.max(3, targetZ - 2);
-      addRing(midZ, 2, 40);
-    }
-
+    // 1) Enqueue razor-sharp targetZ FIRST (priority 0..) covering full widescreen viewport!
     if (targetZ >= 3) {
-      const span = targetZ <= 4 ? 3 : 2;
-      addRing(targetZ, span, 0);
+      const span = targetZ <= 4 ? 3 : 4;
+      addRing(targetZ, span, 0, true);
     }
+
+    // 2) Lightweight satellite-only bridge layer for far tilted horizon & seamless flights
+    if (targetZ >= 6) {
+      const bridgeZ = Math.max(4, targetZ - 3);
+      addRing(bridgeZ, 3, 40, false);
+    }
+
+    // 3) Base world shell z=2 (priority 120, labels only when zoomed out!)
+    addRing(2, 2, 120, targetZ <= 3);
 
     for (const [key, entry] of this.activeTiles) {
       if (!desiredKeys.has(key)) {
@@ -686,9 +759,9 @@ export class GlobeEngine {
       }
     }
 
-    if (!force) {
-      this.tileManager.pruneQueue(desiredKeys);
-    }
+    // ALWAYS prune stale out-of-view requests BEFORE pumping so rapid flights never clog the queue!
+    this.tileManager.pruneQueue(desiredKeys);
+    this.tileManager.flushQueue();
   }
 
   private ensureTileMesh(
@@ -696,13 +769,13 @@ export class GlobeEngine {
     x: number,
     y: number,
     withSvOverlay: boolean,
+    includeOverlays: boolean,
     priority: number
   ): void {
     const key = this.tileManager.getKey(this.layer, z, x, y, this.useGoogle, withSvOverlay);
     if (this.activeTiles.has(key)) return;
 
-    const radialMult = 1 + (z - 2) * 0.00045;
-    const { geometry, centerUnit } = buildTileGeometry(z, x, y, radialMult);
+    const { geometry, centerUnit } = buildTileGeometry(z, x, y);
     const cachedTex = this.tileManager.getCached(
       this.layer,
       z,
@@ -712,20 +785,23 @@ export class GlobeEngine {
       withSvOverlay
     );
 
+    // All tile layers use transparent=true + depthWrite=false + renderOrder=z so Three.js
+    // strictly renders z=2 -> bridgeZ -> targetZ in exact painter order with ZERO parent/child
+    // z-fighting or depth override at any altitude (17,500 km down to 120 m)!
     const material = new THREE.MeshBasicMaterial({
-      map: cachedTex ?? undefined,
+      map: cachedTex ?? null,
       color: 0xffffff,
-      transparent: !cachedTex,
+      transparent: true,
       opacity: cachedTex ? 1.0 : 0.0,
-      depthWrite: z === 2 || Boolean(cachedTex),
-      polygonOffset: z > 2,
-      polygonOffsetFactor: -(z - 2) * 2,
-      polygonOffsetUnits: -(z - 2) * 2,
+      depthTest: true,
+      depthWrite: false,
     });
 
     const mesh = new THREE.Mesh(geometry, material);
     mesh.renderOrder = z;
+    mesh.frustumCulled = false;
     mesh.visible = Boolean(cachedTex);
+
     mesh.position.set(
       (centerUnit.x - this.anchorUnit.x) * this.visualRadiusM,
       (centerUnit.y - this.anchorUnit.y) * this.visualRadiusM,
@@ -756,17 +832,16 @@ export class GlobeEngine {
         y,
         this.useGoogle,
         withSvOverlay,
+        includeOverlays,
         priority,
         (tex) => {
           const cur = this.activeTiles.get(key);
           if (!cur || !tex) return;
           cur.material.map = tex;
           cur.material.needsUpdate = true;
-          cur.material.transparent = true;
-          cur.material.opacity = z === 2 ? 1.0 : 0.05;
-          cur.material.depthWrite = z === 2;
+          cur.material.opacity = z === 2 ? 1.0 : 0.15;
           cur.loaded = true;
-          cur.fade = z === 2 ? 1.0 : 0.05;
+          cur.fade = z === 2 ? 1.0 : 0.15;
           cur.mesh.visible = true;
         }
       );

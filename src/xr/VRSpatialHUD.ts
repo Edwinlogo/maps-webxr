@@ -461,12 +461,18 @@ export class VRSpatialHUD {
       }
     );
 
-    // Primary Street View / Return Row
+    // Primary Vista 360° / Return Row
     if (isSV) {
       const qual =
         s.streetQuality === 'hd' ? 'HD' : s.streetQuality === 'sd' ? 'Mejorando HD...' : 'Cargando...';
+      const provLabel =
+        s.currentPano?.provider === 'google'
+          ? s.currentPano.copyright || 'Google Street View'
+          : s.currentPano?.provider === 'mapillary'
+            ? 'Mapillary · Vista 360°'
+            : 'Panoramax · Vista 360°';
       this.drawButton('primary_cta', 34, 112, 460, 82, 'VOLVER AL PLANETA 3D', {
-        sublabel: `${s.currentPano?.copyright ?? (s.currentPano?.provider === 'mapillary' ? 'Mapillary' : 'Panoramax')} · ${qual}`,
+        sublabel: `${provLabel} · ${qual}`,
         primary: true,
         accent: 'amber',
         fontSize: 22,
@@ -488,18 +494,23 @@ export class VRSpatialHUD {
       });
     } else {
       const hasNearby = Boolean(s.nearbyPano);
+      const isGooglePano = s.nearbyPano?.provider === 'google';
       this.drawButton(
         'primary_cta',
         34,
         112,
         526,
         82,
-        hasNearby ? 'ENTRAR A STREET VIEW 360°' : 'BUSCAR STREET VIEW 360° AQUÍ',
+        hasNearby
+          ? isGooglePano
+            ? 'ENTRAR A GOOGLE STREET VIEW'
+            : 'ENTRAR EN VISTA 360°'
+          : 'EXPLORAR VISTA 360° AQUÍ',
         {
           sublabel: s.searchingPano
-            ? 'Buscando 360° en esta calle...'
+            ? 'Buscando panoramas 360° cercanos...'
             : s.nearbyPano
-              ? `Disponible a ${formatDistance(s.nearbyPano.distanceMeters)} · Toca o pulsa A`
+              ? `Panorama a ${formatDistance(s.nearbyPano.distanceMeters)} · Toca o pulsa A`
               : s.statusMessage,
           primary: true,
           accent: hasNearby ? 'emerald' : 'cyan',
