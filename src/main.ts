@@ -58,6 +58,8 @@ class EarthXRApp {
   private passthroughEnabled = false;
   private globeMoveMode = false;
   private activeLocationLabel = 'Planeta Tierra';
+  private userLocation: { lat: number; lon: number; label?: string } | null = null;
+  private geoRequested = false;
   private globeDragOffset = new THREE.Vector3();
 
   // Multi-touch + desktop pointer state (supports 1-finger pan, 2-finger pinch-to-zoom, and desktop drag)
@@ -130,10 +132,7 @@ class EarthXRApp {
       },
       onSetAutoTiltMax: (maxDeg) => this.applyAutoTiltMax(maxDeg),
       onResetNorth: () => this.globe.resetNorth(),
-      onResetGlobe: () => {
-        this.activeLocationLabel = 'Planeta Tierra';
-        this.globe.resetView();
-      },
+      onResetGlobe: () => this.resetGlobeToUserLocation(),
       onToggleGlobeMoveMode: () => this.toggleGlobeMoveMode(),
       onResetGlobePosition: () => this.globe.resetGlobePosition(),
       onToggleFloorShadow: () => this.applyFloorShadow(!this.globe.isFloorShadowEnabled()),
@@ -156,9 +155,12 @@ class EarthXRApp {
     this.xrControllers = new XRControllerManager(this.renderer, this.scene, {
       onSelectRay: (ray) => this.handleSelectRay(ray),
       onLeftStick: (x, y, dt) => {
-        const alt = this.globe.getState().altitudeKm;
-        const degPerSec = THREE.MathUtils.clamp((alt / 6371) * 58, 0.005, 72);
-        this.globe.panByDegrees(-y * degPerSec * dt, x * degPerSec * dt);
+        const st = this.globe.getState();
+        const normAlt = Math.max(0.00001, st.altitudeKm / 6371);
+        const closeDamp = THREE.MathUtils.lerp(0.42, 1.0, THREE.MathUtils.smoothstep(st.altitudeKm, 0.2, 140));
+        const degPerSec = THREE.MathUtils.clamp(normAlt * 44 * closeDamp, 0.00045, 58);
+        const cosLat = Math.max(0.25, Math.cos((st.lat * Math.PI) / 180));
+        this.globe.panByDegrees(-y * degPerSec * dt, (x * degPerSec * dt) / cosLat);
       },
       onRightStick: (x, y, dt) => {
         if (Math.abs(y) > 0.16) this.globe.zoomByFactor(Math.exp(y * dt * 1.9));
@@ -173,9 +175,12 @@ class EarthXRApp {
         }
       },
       onRotateViewDrag: (deltaWorld) => {
-        const alt = this.globe.getState().altitudeKm;
-        const scale = THREE.MathUtils.clamp((alt / 6371) * 110, 0.014, 125);
-        this.globe.panByDegrees(-deltaWorld.y * scale, -deltaWorld.x * scale);
+        const st = this.globe.getState();
+        const normAlt = Math.max(0.00001, st.altitudeKm / 6371);
+        const closeDamp = THREE.MathUtils.lerp(0.42, 1.0, THREE.MathUtils.smoothstep(st.altitudeKm, 0.2, 140));
+        const scale = THREE.MathUtils.clamp(normAlt * 84 * closeDamp, 0.0007, 102);
+        const cosLat = Math.max(0.25, Math.cos((st.lat * Math.PI) / 180));
+        this.globe.panByDegrees(-deltaWorld.y * scale, (-deltaWorld.x * scale) / cosLat);
       },
       onTwoHandZoom: (ratio) => this.globe.zoomByFactor(ratio),
       onTestPanelGrab: (ray) => {
@@ -228,10 +233,7 @@ class EarthXRApp {
       },
       onZoomIn: () => this.globe.zoomByFactor(0.55),
       onZoomOut: () => this.globe.zoomByFactor(1.75),
-      onResetGlobe: () => {
-        this.activeLocationLabel = 'Planeta Tierra';
-        this.globe.resetView();
-      },
+      onResetGlobe: () => this.resetGlobeToUserLocation(),
       onRequestXR: (preferPassthrough) => this.toggleXRSession(preferPassthrough),
       onConfigUpdated: () => this.refreshServerConfig(),
     });
@@ -410,10 +412,60 @@ class EarthXRApp {
     }
   }
 
+  private computePanDegPerPx(altKm: number): number {
+    const normAlt = Math.max(0.00001, altKm / 6371);
+    // Progressive gentle damping as altitude gets closer so city/street panning is silky smooth
+    const closeDamp = THREE.MathUtils.lerp(0.4, 1.0, THREE.MathUtils.smoothstep(altKm, 0.2, 140));
+    return THREE.MathUtils.clamp(normAlt * 0.145 * closeDamp, 0.0000015, 0.26);
+  }
+
+  private panByScreenPixels(dx: number, dy: number): void {
+    const st = this.globe.getState();
+    const degPerPx = this.computePanDegPerPx(st.altitudeKm);
+    const cosLat = Math.max(0.25, Math.cos((st.lat * Math.PI) / 180));
+    this.globe.panByDegrees(dy * degPerPx, (-dx * degPerPx) / cosLat);
+  }
+
+  private resetGlobeToUserLocation(): void {
+    const applyCenter = (lat: number, lon: number, label?: string) => {
+      this.activeLocationLabel = label ? `Planeta Tierra · ${label}` : 'Planeta Tierra';
+      this.globe.resetView(lat, lon);
+    };
+
+    if (this.userLocation) {
+      applyCenter(this.userLocation.lat, this.userLocation.lon, this.userLocation.label);
+    } else {
+      const cur = this.globe.getState();
+      applyCenter(cur.lat, cur.lon);
+    }
+
+    // Upgrade to exact browser Geolocation when available (outside active XR to avoid hidden prompts)
+    if (!this.geoRequested && !this.renderer.xr.isPresenting && 'geolocation' in navigator) {
+      this.geoRequested = true;
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            this.userLocation = { lat, lon, label: 'Tu ubicación' };
+            applyCenter(lat, lon, 'Tu ubicación');
+          }
+        },
+        () => {
+          // Keep Cloudflare edge approxLocation or current center
+        },
+        { enableHighAccuracy: false, timeout: 4000, maximumAge: 600000 }
+      );
+    }
+  }
+
   private async refreshServerConfig(): Promise<void> {
     const cfg = await fetchServerConfig();
     this.googleConfigured = cfg.googleConfigured;
     this.googleActive = cfg.googleActive;
+    if (cfg.approxLocation && !this.userLocation) {
+      this.userLocation = cfg.approxLocation;
+    }
     this.globe.setGoogleMode(cfg.googleActive);
     this.desktopHud.setServerConfig(cfg);
     this.vrHud.updateState({
@@ -631,9 +683,7 @@ class EarthXRApp {
           const mdx = mid.x - this.prevPinchMid.x;
           const mdy = mid.y - this.prevPinchMid.y;
           if (Math.abs(mdx) > 0.3 || Math.abs(mdy) > 0.3) {
-            const alt = this.globe.getState().altitudeKm;
-            const degPerPx = THREE.MathUtils.clamp((alt / 6371) * 0.16, 0.00003, 0.32);
-            this.globe.panByDegrees(mdy * degPerPx, -mdx * degPerPx);
+            this.panByScreenPixels(mdx * 0.9, mdy * 0.9);
           }
         }
 
@@ -647,10 +697,7 @@ class EarthXRApp {
       const dx = e.clientX - this.lastPointerPos.x;
       const dy = e.clientY - this.lastPointerPos.y;
       this.lastPointerPos = { x: e.clientX, y: e.clientY };
-
-      const alt = this.globe.getState().altitudeKm;
-      const degPerPx = THREE.MathUtils.clamp((alt / 6371) * 0.17, 0.00003, 0.34);
-      this.globe.panByDegrees(dy * degPerPx, -dx * degPerPx);
+      this.panByScreenPixels(dx, dy);
     });
 
     const endDrag = (e: PointerEvent) => {

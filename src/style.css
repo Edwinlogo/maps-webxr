@@ -85,19 +85,43 @@ body.passthrough-preview #app {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 12px 6px 16px;
+  gap: 8px;
+  padding: 5px 8px;
   border-radius: 999px;
   min-width: 0;
+  transition: padding 0.2s ease;
+}
+
+.top-pill.search-open {
+  padding: 6px 10px 6px 12px;
+}
+
+.brand-btn {
+  border: none;
+  background: transparent;
+  color: #e0f2fe;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.18s ease, color 0.18s ease;
+  flex-shrink: 0;
+}
+
+.brand-btn:hover,
+.top-pill.search-open .brand-btn {
+  background: rgba(56, 189, 248, 0.16);
+  color: #ffffff;
 }
 
 .brand-name {
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 0.02em;
-  color: #e0f2fe;
+  color: inherit;
   white-space: nowrap;
-  flex-shrink: 0;
 }
 
 .search-wrap {
@@ -252,12 +276,9 @@ body.passthrough-preview #app {
   box-shadow: 0 0 30px rgba(56, 189, 248, 0.52);
 }
 
-.xr-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #67e8f9;
-  box-shadow: 0 0 8px #67e8f9;
+.vr-icon {
+  display: block;
+  flex-shrink: 0;
 }
 
 /* Right Google Earth Control Stack */
@@ -675,15 +696,26 @@ code {
     top: max(10px, env(safe-area-inset-top));
     left: max(10px, env(safe-area-inset-left));
     right: max(10px, env(safe-area-inset-right));
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
     gap: 8px;
   }
 
+  .hud-top.search-open {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .top-pill {
+    width: auto;
+    padding: 4px 6px;
+    gap: 6px;
+  }
+
+  .hud-top.search-open .top-pill {
     width: 100%;
-    padding: 5px 8px 5px 14px;
-    gap: 8px;
+    padding: 5px 8px 5px 10px;
   }
 
   #search-input,
@@ -694,15 +726,19 @@ code {
   }
 
   .search-dropdown {
-    left: -58px;
+    left: -76px;
     width: calc(100vw - 20px);
     max-width: 420px;
   }
 
   .top-right {
-    width: 100%;
+    width: auto;
     justify-content: flex-end;
     gap: 6px;
+  }
+
+  .hud-top.search-open .top-right {
+    width: 100%;
   }
 
   .icon-pill {

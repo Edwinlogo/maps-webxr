@@ -591,8 +591,7 @@ export class VRSpatialHUD {
     );
     this.drawCompassButton(34 + (w5 + gap) * 3, r1Y, w5, r1H, s.headingDeg);
     this.drawButton('reset_globe', 34 + (w5 + gap) * 4, r1Y, w5, r1H, '🌍', {
-      sublabel: 'Planeta',
-      fontSize: 30,
+      fontSize: 44,
       action: () => this.callbacks.onResetGlobe(),
     });
 

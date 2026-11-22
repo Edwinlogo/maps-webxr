@@ -279,7 +279,20 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     const { key, source } = resolveGoogleKey(request, env);
     const googleConfigured = Boolean(key);
     const googleActive = googleConfigured && isGoogleRequested(request);
-    return jsonResponse({ googleConfigured, googleSource: source, googleActive }, 200, 0);
+    const cf = (request as unknown as {
+      cf?: { latitude?: string; longitude?: string; city?: string; country?: string };
+    }).cf;
+    const cfLat = cf?.latitude ? Number(cf.latitude) : NaN;
+    const cfLon = cf?.longitude ? Number(cf.longitude) : NaN;
+    const approxLocation =
+      Number.isFinite(cfLat) && Number.isFinite(cfLon)
+        ? {
+            lat: cfLat,
+            lon: cfLon,
+            label: cf?.city || cf?.country || undefined,
+          }
+        : undefined;
+    return jsonResponse({ googleConfigured, googleSource: source, googleActive, approxLocation }, 200, 0);
   }
 
   if (path === '/api/gmap/verify') {

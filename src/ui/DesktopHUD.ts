@@ -36,8 +36,13 @@ export class DesktopHUD {
   private root: HTMLElement;
   private callbacks: DesktopHUDCallbacks;
 
+  private topHudEl!: HTMLElement;
+  private topPillEl!: HTMLElement;
+  private brandToggleBtn!: HTMLButtonElement;
+  private searchWrapEl!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private searchResultsEl!: HTMLElement;
+  private searchOpen = false;
   private xrBtn!: HTMLButtonElement;
   private passthroughBtn!: HTMLButtonElement;
   private compassNeedleEl!: HTMLElement;
@@ -76,10 +81,12 @@ export class DesktopHUD {
 
   private render(): void {
     this.root.innerHTML = `
-      <header class="hud-top">
-        <div class="top-pill glass">
-          <span class="brand-name">EarthXR</span>
-          <div class="search-wrap">
+      <header class="hud-top" id="hud-top">
+        <div class="top-pill glass" id="top-pill">
+          <button class="brand-btn" id="btn-toggle-search" aria-expanded="false" title="Mostrar u ocultar barra de búsqueda">
+            <span class="brand-name">EarthXR</span>
+          </button>
+          <div class="search-wrap hidden" id="search-wrap">
             <input id="search-input" type="search" placeholder="Buscar ciudad, lugar o calle..." autocomplete="off" />
             <div class="search-dropdown hidden" id="search-results"></div>
           </div>
@@ -91,9 +98,14 @@ export class DesktopHUD {
             <span id="pt-label">Estrellas</span>
           </button>
           <button class="icon-btn glass" id="btn-settings" title="Configuración">⚙</button>
-          <button class="xr-btn" id="btn-enter-xr">
-            <span class="xr-dot"></span>
-            <span id="xr-btn-label">Entrar en XR</span>
+          <button class="xr-btn" id="btn-enter-xr" title="Entrar en modo VR">
+            <svg class="vr-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="6" width="20" height="12" rx="3.5" />
+              <circle cx="8" cy="12" r="2" />
+              <circle cx="16" cy="12" r="2" />
+              <path d="M10.2 18l1.8-2.3 1.8 2.3" />
+            </svg>
+            <span id="xr-btn-label">VR</span>
           </button>
         </div>
       </header>
@@ -200,6 +212,10 @@ export class DesktopHUD {
       </div>
     `;
 
+    this.topHudEl = this.root.querySelector('#hud-top')!;
+    this.topPillEl = this.root.querySelector('#top-pill')!;
+    this.brandToggleBtn = this.root.querySelector('#btn-toggle-search')!;
+    this.searchWrapEl = this.root.querySelector('#search-wrap')!;
     this.searchInput = this.root.querySelector('#search-input')!;
     this.searchResultsEl = this.root.querySelector('#search-results')!;
     this.xrBtn = this.root.querySelector('#btn-enter-xr')!;
@@ -308,6 +324,10 @@ export class DesktopHUD {
       }
     });
 
+    this.brandToggleBtn.addEventListener('click', () => {
+      this.setSearchOpen(!this.searchOpen);
+    });
+
     this.searchInput.addEventListener('input', () => {
       const q = this.searchInput.value.trim();
       if (this.searchTimer) window.clearTimeout(this.searchTimer);
@@ -324,7 +344,11 @@ export class DesktopHUD {
         const q = this.searchInput.value.trim();
         if (q.length >= 2) this.runSearch(q, true);
       } else if (e.key === 'Escape') {
-        this.searchResultsEl.classList.add('hidden');
+        if (!this.searchResultsEl.classList.contains('hidden')) {
+          this.searchResultsEl.classList.add('hidden');
+        } else {
+          this.setSearchOpen(false);
+        }
       }
     });
 
@@ -333,6 +357,20 @@ export class DesktopHUD {
         this.searchResultsEl.classList.add('hidden');
       }
     });
+  }
+
+  private setSearchOpen(open: boolean): void {
+    this.searchOpen = open;
+    this.searchWrapEl.classList.toggle('hidden', !open);
+    this.topPillEl.classList.toggle('search-open', open);
+    this.topHudEl.classList.toggle('search-open', open);
+    this.brandToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      window.setTimeout(() => this.searchInput.focus(), 20);
+    } else {
+      this.searchResultsEl.classList.add('hidden');
+      this.searchInput.blur();
+    }
   }
 
   public openSettings(): void {
@@ -440,18 +478,14 @@ export class DesktopHUD {
     const label = this.root.querySelector('#xr-btn-label')!;
     if (active) {
       this.xrBtn.classList.add('active');
-      label.textContent = 'Salir de XR';
-    } else if (arSupported) {
+      label.textContent = 'Salir VR';
+    } else if (arSupported || vrSupported) {
       this.xrBtn.classList.remove('active');
       this.xrBtn.classList.add('ready');
-      label.textContent = 'Entrar en Quest 3 · XR';
-    } else if (vrSupported) {
-      this.xrBtn.classList.remove('active');
-      this.xrBtn.classList.add('ready');
-      label.textContent = 'Entrar en VR';
+      label.textContent = 'VR';
     } else {
       this.xrBtn.classList.remove('active', 'ready');
-      label.textContent = 'Abrir en Quest 3';
+      label.textContent = 'VR';
     }
   }
 

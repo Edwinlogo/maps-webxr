@@ -778,8 +778,10 @@ export class GlobeEngine {
     this.targetState.headingDeg = (this.targetState.headingDeg + deltaDeg) % 360;
   }
 
-  public resetView(): void {
-    this.flyTo(16, -52, 13800, 1.5);
+  public resetView(centerLat?: number, centerLon?: number): void {
+    const lat = typeof centerLat === 'number' && Number.isFinite(centerLat) ? centerLat : 16;
+    const lon = typeof centerLon === 'number' && Number.isFinite(centerLon) ? centerLon : -52;
+    this.flyTo(lat, lon, 13800, 1.5);
     this.targetState.headingDeg = 0;
     this.targetState.tiltDeg = 0;
     this.resetGlobePosition();
