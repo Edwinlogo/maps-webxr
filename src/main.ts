@@ -146,7 +146,9 @@ class EarthXRApp {
       },
       onExitXR: () => {
         const s = this.renderer.xr.getSession();
-        if (s) s.end();
+        if (s) {
+          s.end().catch(() => {});
+        }
       },
     });
     this.scene.add(this.vrHud.group);
@@ -181,10 +183,7 @@ class EarthXRApp {
         if (hit) this.vrHud.setGrabState(true, true);
         return hit;
       },
-      onTestPanelBody: (ray) => {
-        const hit = this.vrHud.testHover(ray);
-        return Boolean(hit && !hit.isGrab);
-      },
+      onTestPanelBody: (ray) => this.vrHud.beginPress(ray),
       onPanelDragMove: (worldPos) => {
         const cam = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
         this.vrHud.moveToWorldPosition(worldPos, cam);

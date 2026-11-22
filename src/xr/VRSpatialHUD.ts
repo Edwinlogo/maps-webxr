@@ -101,6 +101,7 @@ export class VRSpatialHUD {
 
   private regions: HitRegion[] = [];
   private hoveredRegionId: string | null = null;
+  private pressedRegionId: string | null = null;
   private isGrabbed = false;
   private isGrabHovered = false;
   private settingsOpen = false;
@@ -298,22 +299,48 @@ export class VRSpatialHUD {
     }
   }
 
+  public beginPress(raycaster: THREE.Raycaster): boolean {
+    const hit = this.testHover(raycaster);
+    if (!hit || hit.isGrab) {
+      this.pressedRegionId = null;
+      return false;
+    }
+    this.pressedRegionId = hit.regionId;
+    return true;
+  }
+
   public triggerClick(raycaster: THREE.Raycaster): boolean {
-    if (!this.group.visible) return false;
+    if (!this.group.visible) {
+      this.pressedRegionId = null;
+      return false;
+    }
+    const fallbackId = this.pressedRegionId;
+    this.pressedRegionId = null;
+
     const hits = raycaster.intersectObject(this.panelMesh, false);
-    if (hits.length === 0 || !hits[0].uv) return false;
+    if (hits.length > 0 && hits[0].uv) {
+      const uv = hits[0].uv;
+      const px = uv.x * CANVAS_W;
+      const py = (1 - uv.y) * CANVAS_H;
 
-    const uv = hits[0].uv;
-    const px = uv.x * CANVAS_W;
-    const py = (1 - uv.y) * CANVAS_H;
+      for (const r of this.regions) {
+        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+          r.action();
+          return true;
+        }
+      }
+    }
 
-    for (const r of this.regions) {
-      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
-        r.action();
+    // Fallback for Meta Quest bare-hand pinch release jitter
+    if (fallbackId) {
+      const fallback = this.regions.find((r) => r.id === fallbackId);
+      if (fallback) {
+        fallback.action();
         return true;
       }
     }
-    return true;
+
+    return hits.length > 0;
   }
 
   private drawButton(
@@ -501,7 +528,7 @@ export class VRSpatialHUD {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 26px system-ui, sans-serif';
-    ctx.fillText(s.locationLabel, 34, 46, 560);
+    ctx.fillText(s.locationLabel, 34, 46, 680);
 
     ctx.fillStyle = '#94a3b8';
     ctx.font = '500 17px ui-monospace, monospace';
@@ -509,14 +536,23 @@ export class VRSpatialHUD {
       `${formatCoords(s.lat, s.lon)}   ·   Altitud ${formatAltitude(s.altitudeKm)}`,
       34,
       78,
-      620
+      680
     );
 
-    this.drawButton('exit_xr', CANVAS_W - 188, 28, 154, 54, '✕  Salir XR', {
-      accent: 'rose',
-      fontSize: 18,
-      action: () => this.callbacks.onExitXR(),
-    });
+    // Subtle status badge top right
+    ctx.save();
+    ctx.fillStyle = s.passthrough ? 'rgba(124, 58, 237, 0.28)' : 'rgba(14, 165, 233, 0.2)';
+    ctx.strokeStyle = s.passthrough ? 'rgba(196, 181, 253, 0.55)' : 'rgba(125, 211, 252, 0.45)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.roundRect(CANVAS_W - 224, 34, 190, 40, 20);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e0f2fe';
+    ctx.font = '600 15px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(s.passthrough ? '●  VR · Passthrough' : '●  VR · Espacio', CANVAS_W - 129, 54);
+    ctx.restore();
 
     // Row 1: All 2D navigation controls (Zoom +, Zoom -, 3D/2D Tilt, Compass N, Full Globe)
     const r1Y = 114;
@@ -560,20 +596,20 @@ export class VRSpatialHUD {
       action: () => this.callbacks.onResetGlobe(),
     });
 
-    // Row 2: Mover Globo en 3D + Cambiar fondo + Configuración
+    // Row 2: Mover Globo en 3D + Cambiar fondo + Configuración + Salir de VR
     const r2Y = 248;
     const r2H = 112;
-    const w3 = (CANVAS_W - 68 - gap * 2) / 3;
+    const w4 = (CANVAS_W - 68 - gap * 3) / 4;
 
     this.drawButton(
       'move_globe',
       34,
       r2Y,
-      w3,
+      w4,
       r2H,
-      s.globeMoveMode ? '✋  MOVIENDO GLOBO' : '✋  MOVER GLOBO',
+      s.globeMoveMode ? '✋ Moviendo' : '✋ Mover globo',
       {
-        sublabel: s.globeMoveMode ? 'Pellizca y ubica en 3D' : 'Reubicar globo en el espacio',
+        sublabel: s.globeMoveMode ? 'Ubica en 3D' : 'Mover en espacio',
         accent: s.globeMoveMode ? 'emerald' : 'slate',
         fontSize: 19,
         action: () => this.callbacks.onToggleGlobeMoveMode(),
@@ -582,27 +618,34 @@ export class VRSpatialHUD {
 
     this.drawButton(
       'toggle_bg',
-      34 + w3 + gap,
+      34 + (w4 + gap),
       r2Y,
-      w3,
+      w4,
       r2H,
-      s.passthrough ? '👁  REALIDAD' : '✦  ESTRELLAS',
+      s.passthrough ? '👁 Realidad' : '✦ Estrellas',
       {
-        sublabel: s.passthrough ? 'Passthrough · Toca para espacio' : 'Espacio · Toca para realidad',
+        sublabel: s.passthrough ? 'Cambiar a espacio' : 'Cambiar a realidad',
         accent: s.passthrough ? 'violet' : 'cyan',
-        fontSize: 20,
+        fontSize: 19,
         action: () => this.callbacks.onTogglePassthrough(),
       }
     );
 
     const layerName = s.layer === 'hybrid' ? 'Híbrido' : s.layer === 'satellite' ? 'Satélite' : 'Calles';
-    this.drawButton('open_settings', 34 + (w3 + gap) * 2, r2Y, w3, r2H, '⚙  CONFIGURACIÓN', {
-      sublabel: `${layerName} · Inclinación máx ${s.autoTiltMaxDeg}°`,
+    this.drawButton('open_settings', 34 + (w4 + gap) * 2, r2Y, w4, r2H, '⚙ Configuración', {
+      sublabel: `${layerName} · Máx ${s.autoTiltMaxDeg}°`,
       fontSize: 19,
       action: () => {
         this.settingsOpen = true;
         this.redraw(true);
       },
+    });
+
+    this.drawButton('exit_xr', 34 + (w4 + gap) * 3, r2Y, w4, r2H, '✕  Salir de VR', {
+      sublabel: 'Volver a modo 2D',
+      accent: 'rose',
+      fontSize: 20,
+      action: () => this.callbacks.onExitXR(),
     });
 
     ctx.fillStyle = '#94a3b8';
@@ -619,7 +662,7 @@ export class VRSpatialHUD {
     const s = this.state;
     const ctx = this.ctx;
 
-    this.drawButton('cfg_back', 34, 24, 156, 50, '←  Volver', {
+    this.drawButton('cfg_back', 34, 24, 148, 50, '←  Volver', {
       accent: 'cyan',
       fontSize: 19,
       action: () => {
@@ -632,11 +675,17 @@ export class VRSpatialHUD {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 24px system-ui, sans-serif';
-    ctx.fillText('⚙  Configuración', 212, 49);
+    ctx.fillText('⚙  Configuración', 200, 49);
 
-    this.drawButton('cfg_center_globe', CANVAS_W - 244, 24, 210, 50, '↺  Centrar globo', {
+    this.drawButton('cfg_center_globe', 528, 24, 194, 50, '↺  Centrar globo', {
       fontSize: 17,
       action: () => this.callbacks.onResetGlobePosition(),
+    });
+
+    this.drawButton('cfg_exit_vr', 736, 24, 190, 50, '✕  Salir de VR', {
+      accent: 'rose',
+      fontSize: 18,
+      action: () => this.callbacks.onExitXR(),
     });
 
     // Section 1: Map Layers
