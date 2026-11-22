@@ -33,6 +33,14 @@ function loadSavedFloorShadow(): boolean {
   return true;
 }
 
+interface ActivePointer {
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  pointerType: string;
+}
+
 class EarthXRApp {
   private canvas: HTMLCanvasElement;
   private renderer: THREE.WebGLRenderer;
@@ -51,6 +59,15 @@ class EarthXRApp {
   private globeMoveMode = false;
   private activeLocationLabel = 'Planeta Tierra';
   private globeDragOffset = new THREE.Vector3();
+
+  // Multi-touch + desktop pointer state (supports 1-finger pan, 2-finger pinch-to-zoom, and desktop drag)
+  private activePointers = new Map<number, ActivePointer>();
+  private prevPinchDist: number | null = null;
+  private prevPinchMid: { x: number; y: number } | null = null;
+  private hadMultiTouch = false;
+  private lastTouchTapTime = 0;
+  private lastTouchTapPos = { x: 0, y: 0 };
+  private lastStepZoomTime = 0;
 
   private isDragging = false;
   private isOrbitTiltDragging = false;
@@ -74,7 +91,6 @@ class EarthXRApp {
       powerPreference: 'high-performance',
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.xr.enabled = true;
@@ -85,10 +101,11 @@ class EarthXRApp {
 
     this.camera = new THREE.PerspectiveCamera(
       56,
-      window.innerWidth / window.innerHeight,
+      window.innerWidth / Math.max(1, window.innerHeight),
       0.04,
       600
     );
+    this.updateCameraProjection();
 
     this.desktopRig = new THREE.Group();
     this.desktopRig.position.set(0, ANCHOR_Y_M, 0);
@@ -228,6 +245,55 @@ class EarthXRApp {
     this.setupWebXR();
     this.refreshServerConfig();
     this.renderer.setAnimationLoop(() => this.tick());
+  }
+
+  /**
+   * Keeps the Earth globe comfortably framed across desktop, tablet, and portrait mobile screens.
+   */
+  private updateCameraProjection(): void {
+    const w = window.innerWidth;
+    const h = Math.max(1, window.innerHeight);
+    const aspect = w / h;
+    this.camera.aspect = aspect;
+    if (aspect < 1.0) {
+      const targetHalfHFovRad = THREE.MathUtils.degToRad(24.5);
+      const halfVFovRad = Math.atan(Math.tan(targetHalfHFovRad) / Math.max(0.38, aspect));
+      this.camera.fov = THREE.MathUtils.clamp(THREE.MathUtils.radToDeg(halfVFovRad * 2), 56, 94);
+    } else {
+      this.camera.fov = 56;
+    }
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+
+  /**
+   * Gentle progressive zoom step on click / double-tap starting at Continent level (~4,200 km)
+   * instead of jumping directly to maximum zoom.
+   */
+  private computeStepZoomAltitude(curAlt: number): number {
+    if (curAlt > 5500) return 4200; // Nivel de continente
+    if (curAlt > 2200) return 1500; // Nivel de país
+    if (curAlt > 650) return 420;   // Región / departamento
+    if (curAlt > 160) return 90;    // Área metropolitana
+    if (curAlt > 30) return 16;     // Ciudad
+    return Math.max(0.25, curAlt * 0.5);
+  }
+
+  private triggerStepZoomTo(lat: number, lon: number): void {
+    const now = performance.now();
+    if (now - this.lastStepZoomTime < 450) return;
+    this.lastStepZoomTime = now;
+    const curAlt = this.globe.getState().altitudeKm;
+    const targetAlt = this.computeStepZoomAltitude(curAlt);
+    this.activeLocationLabel = 'Ubicación seleccionada';
+    this.globe.flyTo(lat, lon, targetAlt, 1.15);
+  }
+
+  private zoomStepAtClientPoint(clientX: number, clientY: number): void {
+    this.updateMouseRayFromClient(clientX, clientY);
+    const hit = this.globe.raycastGlobe(this.mouseRaycaster);
+    if (!hit) return;
+    this.triggerStepZoomTo(hit.lat, hit.lon);
   }
 
   private applyAutoTiltMax(maxDeg: number, persist = true): void {
@@ -390,6 +456,7 @@ class EarthXRApp {
       this.globeMoveMode = false;
       this.xrControllers.setGlobeMoveMode(false);
       this.vrHud.updateState({ globeMoveMode: false });
+      this.updateCameraProjection();
     });
   }
 
@@ -433,7 +500,18 @@ class EarthXRApp {
   private visitSearchResult(res: GeocodeResult): void {
     this.activeLocationLabel = res.name;
     this.desktopHud.showToast(`Volando hacia ${res.name}...`);
-    this.globe.flyTo(res.lat, res.lon, 1.0, 1.8);
+    const t = (res.type || '').toLowerCase();
+    const targetAlt =
+      t === 'continent'
+        ? 4200
+        : t === 'country'
+          ? 1800
+          : t === 'state' || t === 'region' || t === 'province'
+            ? 420
+            : t === 'city' || t === 'town' || t === 'administrative'
+              ? 14
+              : 1.4;
+    this.globe.flyTo(res.lat, res.lon, targetAlt, 1.8);
   }
 
   private handleSelectRay(raycaster: THREE.Raycaster): void {
@@ -441,25 +519,22 @@ class EarthXRApp {
 
     const globeHit = this.globe.raycastGlobe(raycaster);
     if (globeHit) {
-      const curAlt = this.globe.getState().altitudeKm;
-      const nextAlt = curAlt > 1500 ? 140 : curAlt > 35 ? 2.0 : Math.max(0.25, curAlt * 0.45);
-      this.activeLocationLabel = 'Ubicación seleccionada';
-      this.globe.flyTo(globeHit.lat, globeHit.lon, nextAlt, 1.2);
+      this.triggerStepZoomTo(globeHit.lat, globeHit.lon);
     }
   }
 
   private bindDesktopEvents(): void {
-    window.addEventListener('resize', () => {
-      this.camera.aspect = window.innerWidth / window.innerHeight;
-      this.camera.updateProjectionMatrix();
-      this.renderer.setSize(window.innerWidth, window.innerHeight);
-    });
+    window.addEventListener('resize', () => this.updateCameraProjection());
 
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+    // Prevent iOS Safari native pinch-zooming the page chrome over the WebGL canvas
+    this.canvas.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
+    this.canvas.addEventListener('gesturechange', (e) => e.preventDefault(), { passive: false });
+
     this.canvas.addEventListener('pointerdown', (e) => {
-      // Middle button or Alt + Left drag: move the 3D globe freely in space!
-      if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      // Middle button or Alt + Left drag: move the 3D globe freely in space (desktop)
+      if (e.pointerType !== 'touch' && (e.button === 1 || (e.button === 0 && e.altKey))) {
         e.preventDefault();
         this.isGlobePosDragging = true;
         this.lastPointerPos = { x: e.clientX, y: e.clientY };
@@ -467,22 +542,49 @@ class EarthXRApp {
         this.globe.stopIdleSpin();
         return;
       }
-      if (e.button === 2 || (e.button === 0 && e.shiftKey)) {
+      if (e.pointerType !== 'touch' && (e.button === 2 || (e.button === 0 && e.shiftKey))) {
         this.isOrbitTiltDragging = true;
         this.lastPointerPos = { x: e.clientX, y: e.clientY };
         this.canvas.setPointerCapture(e.pointerId);
         this.globe.stopIdleSpin();
         return;
       }
-      if (e.button !== 0) return;
-      this.isDragging = true;
-      this.lastPointerPos = { x: e.clientX, y: e.clientY };
-      this.canvas.setPointerCapture(e.pointerId);
+      if (e.pointerType !== 'touch' && e.button !== 0) return;
+
+      this.activePointers.set(e.pointerId, {
+        x: e.clientX,
+        y: e.clientY,
+        startX: e.clientX,
+        startY: e.clientY,
+        pointerType: e.pointerType,
+      });
+
+      try {
+        this.canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
       this.globe.stopIdleSpin();
+
+      if (this.activePointers.size >= 2) {
+        // Entering 2-finger pinch-to-zoom!
+        this.isDragging = false;
+        this.hadMultiTouch = true;
+        const pts = Array.from(this.activePointers.values());
+        this.prevPinchDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        this.prevPinchMid = {
+          x: (pts[0].x + pts[1].x) * 0.5,
+          y: (pts[0].y + pts[1].y) * 0.5,
+        };
+      } else {
+        this.hadMultiTouch = false;
+        this.isDragging = true;
+        this.lastPointerPos = { x: e.clientX, y: e.clientY };
+      }
     });
 
     this.canvas.addEventListener('pointermove', (e) => {
-      this.updateMouseRay(e);
+      this.updateMouseRayFromClient(e.clientX, e.clientY);
 
       if (this.isGlobePosDragging) {
         const dx = e.clientX - this.lastPointerPos.x;
@@ -502,6 +604,45 @@ class EarthXRApp {
         return;
       }
 
+      const tracked = this.activePointers.get(e.pointerId);
+      if (!tracked) return;
+      tracked.x = e.clientX;
+      tracked.y = e.clientY;
+
+      // Two-finger pinch-to-zoom (juntar / separar dedos) + simultaneous midpoint pan!
+      if (this.activePointers.size >= 2) {
+        const pts = Array.from(this.activePointers.values());
+        const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        const mid = {
+          x: (pts[0].x + pts[1].x) * 0.5,
+          y: (pts[0].y + pts[1].y) * 0.5,
+        };
+
+        if (this.prevPinchDist !== null && this.prevPinchDist > 12 && dist > 12) {
+          const rawRatio = this.prevPinchDist / dist;
+          if (Math.abs(rawRatio - 1) > 0.0015) {
+            const safeRatio = THREE.MathUtils.clamp(rawRatio, 0.72, 1.38);
+            this.updateMouseRayFromClient(mid.x, mid.y);
+            const hit = safeRatio < 1 ? this.globe.raycastGlobe(this.mouseRaycaster) : null;
+            this.globe.zoomByFactor(safeRatio, hit?.lat, hit?.lon);
+          }
+        }
+
+        if (this.prevPinchMid) {
+          const mdx = mid.x - this.prevPinchMid.x;
+          const mdy = mid.y - this.prevPinchMid.y;
+          if (Math.abs(mdx) > 0.3 || Math.abs(mdy) > 0.3) {
+            const alt = this.globe.getState().altitudeKm;
+            const degPerPx = THREE.MathUtils.clamp((alt / 6371) * 0.16, 0.00003, 0.32);
+            this.globe.panByDegrees(mdy * degPerPx, -mdx * degPerPx);
+          }
+        }
+
+        this.prevPinchDist = dist;
+        this.prevPinchMid = mid;
+        return;
+      }
+
       if (!this.isDragging) return;
 
       const dx = e.clientX - this.lastPointerPos.x;
@@ -514,9 +655,49 @@ class EarthXRApp {
     });
 
     const endDrag = (e: PointerEvent) => {
-      this.isDragging = false;
-      this.isOrbitTiltDragging = false;
-      this.isGlobePosDragging = false;
+      const ended = this.activePointers.get(e.pointerId);
+      this.activePointers.delete(e.pointerId);
+
+      // Detect crisp touch double-tap (since touch-action: none suppresses native dblclick on mobile)
+      if (
+        ended &&
+        ended.pointerType === 'touch' &&
+        !this.hadMultiTouch &&
+        this.activePointers.size === 0
+      ) {
+        const moved = Math.hypot(ended.x - ended.startX, ended.y - ended.startY);
+        const now = performance.now();
+        if (moved < 12) {
+          const sinceLast = now - this.lastTouchTapTime;
+          const distLast = Math.hypot(
+            ended.x - this.lastTouchTapPos.x,
+            ended.y - this.lastTouchTapPos.y
+          );
+          if (sinceLast < 320 && distLast < 38) {
+            this.lastTouchTapTime = 0;
+            this.zoomStepAtClientPoint(ended.x, ended.y);
+          } else {
+            this.lastTouchTapTime = now;
+            this.lastTouchTapPos = { x: ended.x, y: ended.y };
+          }
+        }
+      }
+
+      if (this.activePointers.size === 1) {
+        // Transition smoothly back to 1-finger pan without any jump
+        const rem = Array.from(this.activePointers.values())[0];
+        this.prevPinchDist = null;
+        this.prevPinchMid = null;
+        this.isDragging = true;
+        this.lastPointerPos = { x: rem.x, y: rem.y };
+      } else if (this.activePointers.size === 0) {
+        this.prevPinchDist = null;
+        this.prevPinchMid = null;
+        this.isDragging = false;
+        this.isOrbitTiltDragging = false;
+        this.isGlobePosDragging = false;
+      }
+
       try {
         this.canvas.releasePointerCapture(e.pointerId);
       } catch {
@@ -527,32 +708,32 @@ class EarthXRApp {
     this.canvas.addEventListener('pointerup', endDrag);
     this.canvas.addEventListener('pointercancel', endDrag);
 
+    // Desktop double-click: step zoom (Continent -> Country -> Region -> City)
     this.canvas.addEventListener('dblclick', (e) => {
-      this.updateMouseRay(e);
-      const hit = this.globe.raycastGlobe(this.mouseRaycaster);
-      if (!hit) return;
-      const curAlt = this.globe.getState().altitudeKm;
-      const targetAlt = curAlt > 800 ? 45 : curAlt > 8 ? 1.0 : 0.3;
-      this.activeLocationLabel = 'Ubicación seleccionada';
-      this.globe.flyTo(hit.lat, hit.lon, targetAlt, 1.15);
+      this.zoomStepAtClientPoint(e.clientX, e.clientY);
     });
 
+    // Mouse wheel AND laptop trackpad 2-finger pinch-to-zoom (e.ctrlKey === true)
     this.canvas.addEventListener(
       'wheel',
       (e) => {
         e.preventDefault();
-        this.updateMouseRay(e);
-        const hit = e.deltaY < 0 ? this.globe.raycastGlobe(this.mouseRaycaster) : null;
-        this.globe.zoomByFactor(Math.exp(e.deltaY * 0.00145), hit?.lat, hit?.lon);
+        this.updateMouseRayFromClient(e.clientX, e.clientY);
+        const clampedDelta = THREE.MathUtils.clamp(e.deltaY, -180, 180);
+        const sensitivity = e.ctrlKey ? 0.0085 : 0.00145;
+        const factor = Math.exp(clampedDelta * sensitivity);
+        const hit = clampedDelta < 0 ? this.globe.raycastGlobe(this.mouseRaycaster) : null;
+        this.globe.zoomByFactor(factor, hit?.lat, hit?.lon);
       },
       { passive: false }
     );
   }
 
-  private updateMouseRay(e: PointerEvent | MouseEvent): void {
+  private updateMouseRayFromClient(clientX: number, clientY: number): void {
     const rect = this.canvas.getBoundingClientRect();
-    this.mouseNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.mouseNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    if (rect.width <= 0 || rect.height <= 0) return;
+    this.mouseNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouseNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.mouseRaycaster.setFromCamera(this.mouseNdc, this.camera);
   }
 

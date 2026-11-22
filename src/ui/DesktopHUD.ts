@@ -186,13 +186,13 @@ export class DesktopHUD {
             </section>
 
             <section class="cfg-section gestures-box">
-              <h4>Controles y Gestos (Meta Quest 3 & Escritorio)</h4>
+              <h4>Controles y Gestos (Meta Quest 3, Móvil y Escritorio)</h4>
               <ul>
-                <li><b>Pellizcar + Mover (1 mano):</b> Rotar el planeta</li>
-                <li><b>Spread / Pinch-out (2 manos pellizcando):</b> Separar = acercar · Juntar = alejar</li>
-                <li><b>Mover globo 3D en el espacio:</b> Pellizca la barra <code>⠿</code> debajo del globo, activa <code>✋ Mover globo</code> en el panel 3D, o usa el botón <b>Grip</b> en mandos Quest 3</li>
+                <li><b>Móvil / Táctil 2D:</b> 1 dedo = rotar · <b>Juntar / separar 2 dedos</b> = zoom · Doble toque = acercar por niveles (continente → país → ciudad)</li>
+                <li><b>Quest 3 (Manos):</b> Pellizcar + mover = rotar · <b>Spread / Pinch-out</b> (2 manos) = zoom</li>
+                <li><b>Mover globo 3D en el espacio:</b> Barra <code>⠿</code> debajo del globo, botón <code>✋ Mover globo</code>, botón <b>Grip</b> en mandos o <b>Alt + arrastrar</b> en PC</li>
                 <li><b>Mover tablero 3D:</b> Pellizca la barra superior <code>⠿</code> o inferior y ubícalo donde quieras</li>
-                <li><b>Escritorio:</b> Rueda = zoom · Clic derecho / Shift + arrastrar = inclinar hasta 90° · <b>Alt + arrastrar</b> o clic central = mover globo en 3D</li>
+                <li><b>Escritorio:</b> Rueda / pellizco en touchpad = zoom · Clic derecho o Shift + arrastrar = inclinar hasta 90°</li>
               </ul>
             </section>
           </div>

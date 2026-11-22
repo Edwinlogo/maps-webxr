@@ -18,12 +18,15 @@ body,
 #app {
   width: 100%;
   height: 100%;
+  height: 100dvh;
   overflow: hidden;
   background: var(--bg-space);
   color: var(--text-main);
   font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
 }
 
 body.passthrough-preview #app {
@@ -68,9 +71,9 @@ body.passthrough-preview #app {
 /* Minimalist Top Bar */
 .hud-top {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  right: 16px;
+  top: max(14px, env(safe-area-inset-top));
+  left: max(14px, env(safe-area-inset-left));
+  right: max(14px, env(safe-area-inset-right));
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -79,11 +82,13 @@ body.passthrough-preview #app {
 
 .top-pill {
   pointer-events: auto;
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 6px 12px 6px 16px;
   border-radius: 999px;
+  min-width: 0;
 }
 
 .brand-name {
@@ -91,14 +96,19 @@ body.passthrough-preview #app {
   font-size: 14px;
   letter-spacing: 0.02em;
   color: #e0f2fe;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .search-wrap {
   position: relative;
+  flex: 1;
+  min-width: 0;
 }
 
 #search-input {
   width: 230px;
+  max-width: 100%;
   padding: 7px 12px;
   border-radius: 999px;
   border: 1px solid transparent;
@@ -118,7 +128,7 @@ body.passthrough-preview #app {
   position: absolute;
   top: calc(100% + 10px);
   left: 0;
-  width: 320px;
+  width: min(320px, calc(100vw - 32px));
   max-height: 260px;
   overflow-y: auto;
   background: rgba(7, 13, 26, 0.96);
@@ -254,7 +264,7 @@ body.passthrough-preview #app {
 .zoom-stack {
   pointer-events: auto;
   position: absolute;
-  right: 16px;
+  right: max(14px, env(safe-area-inset-right));
   top: 50%;
   transform: translateY(-50%);
   display: flex;
@@ -303,9 +313,9 @@ body.passthrough-preview #app {
 /* Bottom Minimal Telemetry */
 .hud-bottom {
   position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 16px;
+  left: max(14px, env(safe-area-inset-left));
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
   display: flex;
   align-items: flex-end;
   justify-content: flex-start;
@@ -319,12 +329,22 @@ body.passthrough-preview #app {
   padding: 9px 16px;
   border-radius: 999px;
   font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.telemetry strong {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .tel-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #94a3b8;
   font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sv-btn {
@@ -631,8 +651,172 @@ code {
   color: #7dd3fc;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   #search-input {
-    width: 140px;
+    width: 175px;
+  }
+
+  #search-input:focus {
+    width: 215px;
+  }
+
+  .xr-btn {
+    padding: 8px 13px;
+    font-size: 12px;
+  }
+
+  .icon-pill {
+    padding: 7px 11px;
+  }
+}
+
+@media (max-width: 680px) {
+  .hud-top {
+    top: max(10px, env(safe-area-inset-top));
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .top-pill {
+    width: 100%;
+    padding: 5px 8px 5px 14px;
+    gap: 8px;
+  }
+
+  #search-input,
+  #search-input:focus {
+    width: 100%;
+    font-size: 14px;
+    padding: 8px 12px;
+  }
+
+  .search-dropdown {
+    left: -58px;
+    width: calc(100vw - 20px);
+    max-width: 420px;
+  }
+
+  .top-right {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .icon-pill {
+    padding: 8px 11px;
+    font-size: 12px;
+  }
+
+  .icon-btn {
+    width: 38px;
+    height: 38px;
+    flex-shrink: 0;
+  }
+
+  .xr-btn {
+    padding: 8px 13px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .zoom-stack {
+    right: max(10px, env(safe-area-inset-right));
+    top: 56%;
+  }
+
+  .zoom-stack button {
+    width: 42px;
+    height: 40px;
+    font-size: 15px;
+  }
+
+  .hud-bottom {
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .telemetry {
+    padding: 8px 12px;
+    gap: 6px;
+    font-size: 11px;
+  }
+
+  .tel-mono {
+    font-size: 10px;
+  }
+
+  .toast {
+    top: calc(max(10px, env(safe-area-inset-top)) + 104px);
+    max-width: calc(100vw - 24px);
+    text-align: center;
+    font-size: 12px;
+  }
+
+  .modal-backdrop {
+    padding: 12px;
+  }
+
+  .modal {
+    padding: 16px;
+    max-height: 86dvh;
+    border-radius: 18px;
+  }
+
+  .section-title-row {
+    flex-wrap: wrap;
+  }
+
+  .tilt-cfg-head {
+    flex-wrap: wrap;
+  }
+
+  .preset-row {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 7px;
+  }
+
+  .preset-btn {
+    padding: 9px 6px;
+    font-size: 12px;
+  }
+
+  .token-row {
+    flex-direction: column;
+  }
+
+  .token-row .sv-btn {
+    width: 100%;
+    padding: 10px 14px;
+  }
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+  .hud-top {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .top-pill {
+    width: auto;
+    flex: 1;
+    max-width: 340px;
+  }
+
+  .top-right {
+    width: auto;
+  }
+
+  .zoom-stack {
+    top: 54%;
+  }
+
+  .zoom-stack button {
+    width: 36px;
+    height: 32px;
+    font-size: 13px;
   }
 }
