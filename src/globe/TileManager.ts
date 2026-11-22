@@ -20,8 +20,8 @@ interface PendingTask {
   callbacks: Array<(tex: THREE.Texture | null) => void>;
 }
 
-const MAX_CACHE_ENTRIES = 320;
-const MAX_CONCURRENT = 8;
+const MAX_CACHE_ENTRIES = 460;
+const MAX_CONCURRENT = 10;
 
 function esriSatelliteUrl(z: number, x: number, y: number): string {
   return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;

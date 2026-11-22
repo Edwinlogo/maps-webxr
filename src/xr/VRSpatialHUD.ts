@@ -10,6 +10,9 @@ export interface VRHudState {
   headingDeg: number;
   tiltDeg: number;
   tilt3DEnabled: boolean;
+  autoTiltMaxDeg: number;
+  globeMoveMode: boolean;
+  floorShadowEnabled: boolean;
   layer: MapLayer;
   passthrough: boolean;
   googleConfigured: boolean;
@@ -21,8 +24,12 @@ export interface VRHudCallbacks {
   onZoomOut: () => void;
   onToggleTilt3D: () => void;
   onAdjustTilt: (deltaDeg: number) => void;
+  onSetAutoTiltMax: (maxDeg: number) => void;
   onResetNorth: () => void;
   onResetGlobe: () => void;
+  onToggleGlobeMoveMode: () => void;
+  onResetGlobePosition: () => void;
+  onToggleFloorShadow: () => void;
   onTogglePassthrough: () => void;
   onSetLayer: (layer: MapLayer) => void;
   onToggleGoogleMaps: () => void;
@@ -39,7 +46,7 @@ interface HitRegion {
 }
 
 const CANVAS_W = 960;
-const CANVAS_H = 420;
+const CANVAS_H = 460;
 const PANEL_W_M = 0.88;
 const PANEL_H_M = (PANEL_W_M * CANVAS_H) / CANVAS_W;
 
@@ -111,6 +118,9 @@ export class VRSpatialHUD {
       headingDeg: 0,
       tiltDeg: 0,
       tilt3DEnabled: true,
+      autoTiltMaxDeg: 45,
+      globeMoveMode: false,
+      floorShadowEnabled: true,
       layer: 'hybrid',
       passthrough: false,
       googleConfigured: false,
@@ -164,7 +174,7 @@ export class VRSpatialHUD {
     this.bottomGrabMesh.renderOrder = 42;
     this.group.add(this.bottomGrabMesh);
 
-    this.group.position.set(0, 0.82, -1.08);
+    this.group.position.set(0, 0.8, -1.08);
     this.group.rotation.set(-0.34, 0, 0);
     this.group.visible = false;
 
@@ -361,22 +371,22 @@ export class VRSpatialHUD {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = hovered || options.active ? 3 : 1.8;
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 18);
+    ctx.roundRect(x, y, w, h, 16);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = textColor;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `700 ${options.fontSize ?? 22}px system-ui, -apple-system, sans-serif`;
+    ctx.font = `700 ${options.fontSize ?? 21}px system-ui, -apple-system, sans-serif`;
 
     if (options.sublabel) {
-      ctx.fillText(label, x + w / 2, y + h / 2 - 12, w - 18);
-      ctx.font = '500 15px system-ui, sans-serif';
+      ctx.fillText(label, x + w / 2, y + h / 2 - 12, w - 16);
+      ctx.font = '500 14px system-ui, sans-serif';
       ctx.fillStyle = 'rgba(226, 232, 240, 0.86)';
-      ctx.fillText(options.sublabel, x + w / 2, y + h / 2 + 15, w - 18);
+      ctx.fillText(options.sublabel, x + w / 2, y + h / 2 + 15, w - 16);
     } else {
-      ctx.fillText(label, x + w / 2, y + h / 2 + 1, w - 18);
+      ctx.fillText(label, x + w / 2, y + h / 2 + 1, w - 16);
     }
     ctx.restore();
   }
@@ -393,13 +403,12 @@ export class VRSpatialHUD {
     ctx.strokeStyle = hovered ? '#38bdf8' : 'rgba(148, 163, 184, 0.36)';
     ctx.lineWidth = hovered ? 3 : 1.8;
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 18);
+    ctx.roundRect(x, y, w, h, 16);
     ctx.fill();
     ctx.stroke();
 
-    // Mini rotating compass needle
     const cx = x + w / 2;
-    const cy = y + 36;
+    const cy = y + 38;
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate((headingDeg * Math.PI) / 180);
@@ -410,7 +419,6 @@ export class VRSpatialHUD {
     ctx.arc(0, 0, 22, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Red North arrow
     ctx.fillStyle = '#f43f5e';
     ctx.beginPath();
     ctx.moveTo(0, -18);
@@ -419,7 +427,6 @@ export class VRSpatialHUD {
     ctx.closePath();
     ctx.fill();
 
-    // Slate South arrow
     ctx.fillStyle = '#94a3b8';
     ctx.beginPath();
     ctx.moveTo(0, 18);
@@ -449,6 +456,9 @@ export class VRSpatialHUD {
       normHeading,
       Math.round(s.tiltDeg),
       s.tilt3DEnabled ? '3d' : '2d',
+      s.autoTiltMaxDeg,
+      s.globeMoveMode ? 'gm1' : 'gm0',
+      s.floorShadowEnabled ? 'sh1' : 'sh0',
       s.layer,
       s.passthrough ? 'pt' : 'sp',
       s.googleConfigured ? 'gc1' : 'gc0',
@@ -463,10 +473,9 @@ export class VRSpatialHUD {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
-    // Frosted glass frame
     const bgGrad = ctx.createLinearGradient(0, 0, CANVAS_W, CANVAS_H);
-    bgGrad.addColorStop(0, 'rgba(6, 12, 26, 0.92)');
-    bgGrad.addColorStop(1, 'rgba(11, 20, 40, 0.92)');
+    bgGrad.addColorStop(0, 'rgba(6, 12, 26, 0.93)');
+    bgGrad.addColorStop(1, 'rgba(11, 20, 40, 0.93)');
     ctx.fillStyle = bgGrad;
     ctx.strokeStyle = 'rgba(125, 211, 252, 0.38)';
     ctx.lineWidth = 2.5;
@@ -488,7 +497,6 @@ export class VRSpatialHUD {
     const s = this.state;
     const ctx = this.ctx;
 
-    // Top telemetry header
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#f8fafc';
@@ -504,16 +512,15 @@ export class VRSpatialHUD {
       620
     );
 
-    // Exit XR button top right
-    this.drawButton('exit_xr', CANVAS_W - 186, 28, 154, 54, '✕  Salir XR', {
+    this.drawButton('exit_xr', CANVAS_W - 188, 28, 154, 54, '✕  Salir XR', {
       accent: 'rose',
       fontSize: 18,
       action: () => this.callbacks.onExitXR(),
     });
 
     // Row 1: All 2D navigation controls (Zoom +, Zoom -, 3D/2D Tilt, Compass N, Full Globe)
-    const r1Y = 112;
-    const r1H = 104;
+    const r1Y = 114;
+    const r1H = 112;
     const gap = 14;
     const w5 = (CANVAS_W - 68 - gap * 4) / 5;
 
@@ -527,17 +534,22 @@ export class VRSpatialHUD {
       fontSize: 34,
       action: () => this.callbacks.onZoomOut(),
     });
+    const roundedTilt = Math.round(s.tiltDeg);
     this.drawButton(
       'tilt_3d',
       34 + (w5 + gap) * 2,
       r1Y,
       w5,
       r1H,
-      s.tilt3DEnabled ? '3D' : '2D',
+      s.tilt3DEnabled ? (roundedTilt >= 85 ? 'PISO 90°' : '3D') : '2D',
       {
-        sublabel: s.tilt3DEnabled ? `Inclinado ${Math.round(s.tiltDeg)}°` : 'Vista vertical',
+        sublabel: s.tilt3DEnabled
+          ? roundedTilt >= 85
+            ? 'Horizontal paralelo'
+            : `Inclinado ${roundedTilt}°`
+          : 'Vista vertical',
         active: s.tilt3DEnabled,
-        fontSize: 28,
+        fontSize: roundedTilt >= 85 && s.tilt3DEnabled ? 22 : 28,
         action: () => this.callbacks.onToggleTilt3D(),
       }
     );
@@ -548,45 +560,58 @@ export class VRSpatialHUD {
       action: () => this.callbacks.onResetGlobe(),
     });
 
-    // Row 2: Cambiar fondo (Estrellas ↔ Realidad Passthrough) + Configuración
-    const r2Y = 236;
-    const r2H = 104;
-    const halfW = (CANVAS_W - 68 - gap) / 2;
+    // Row 2: Mover Globo en 3D + Cambiar fondo + Configuración
+    const r2Y = 248;
+    const r2H = 112;
+    const w3 = (CANVAS_W - 68 - gap * 2) / 3;
+
+    this.drawButton(
+      'move_globe',
+      34,
+      r2Y,
+      w3,
+      r2H,
+      s.globeMoveMode ? '✋  MOVIENDO GLOBO' : '✋  MOVER GLOBO',
+      {
+        sublabel: s.globeMoveMode ? 'Pellizca y ubica en 3D' : 'Reubicar globo en el espacio',
+        accent: s.globeMoveMode ? 'emerald' : 'slate',
+        fontSize: 19,
+        action: () => this.callbacks.onToggleGlobeMoveMode(),
+      }
+    );
 
     this.drawButton(
       'toggle_bg',
-      34,
+      34 + w3 + gap,
       r2Y,
-      halfW,
+      w3,
       r2H,
-      s.passthrough ? '👁  FONDO: REALIDAD (PASSTHROUGH)' : '✦  FONDO: ESPACIO (ESTRELLAS)',
+      s.passthrough ? '👁  REALIDAD' : '✦  ESTRELLAS',
       {
-        sublabel: s.passthrough ? 'Toca para cambiar a estrellas' : 'Toca para ver tu entorno real',
+        sublabel: s.passthrough ? 'Passthrough · Toca para espacio' : 'Espacio · Toca para realidad',
         accent: s.passthrough ? 'violet' : 'cyan',
-        fontSize: 19,
+        fontSize: 20,
         action: () => this.callbacks.onTogglePassthrough(),
       }
     );
 
     const layerName = s.layer === 'hybrid' ? 'Híbrido' : s.layer === 'satellite' ? 'Satélite' : 'Calles';
-    const srcName = s.googleActive ? 'Google Map Tiles' : 'Satélite HD';
-    this.drawButton('open_settings', 34 + halfW + gap, r2Y, halfW, r2H, '⚙  CONFIGURACIÓN', {
-      sublabel: `${layerName} · ${srcName} · Inclinación`,
-      fontSize: 21,
+    this.drawButton('open_settings', 34 + (w3 + gap) * 2, r2Y, w3, r2H, '⚙  CONFIGURACIÓN', {
+      sublabel: `${layerName} · Inclinación máx ${s.autoTiltMaxDeg}°`,
+      fontSize: 19,
       action: () => {
         this.settingsOpen = true;
         this.redraw(true);
       },
     });
 
-    // Gesture hint footer
     ctx.fillStyle = '#94a3b8';
     ctx.font = '500 15px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(
-      'Pellizcar + mover: Rotar planeta   ·   Abrir/cerrar 2 manos: Zoom   ·   Barra superior ⠿: Mover tablero',
+      'Pellizcar + mover: Rotar  ·  2 manos: Zoom  ·  ✋ Mover globo o barra ⠿: Ubicar en 3D',
       CANVAS_W / 2,
-      CANVAS_H - 30
+      CANVAS_H - 36
     );
   }
 
@@ -594,8 +619,7 @@ export class VRSpatialHUD {
     const s = this.state;
     const ctx = this.ctx;
 
-    // Header + Back button
-    this.drawButton('cfg_back', 34, 28, 168, 52, '←  Volver', {
+    this.drawButton('cfg_back', 34, 24, 156, 50, '←  Volver', {
       accent: 'cyan',
       fontSize: 19,
       action: () => {
@@ -607,62 +631,124 @@ export class VRSpatialHUD {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#f8fafc';
-    ctx.font = '700 25px system-ui, sans-serif';
-    ctx.fillText('⚙  Configuración', 224, 54);
+    ctx.font = '700 24px system-ui, sans-serif';
+    ctx.fillText('⚙  Configuración', 212, 49);
+
+    this.drawButton('cfg_center_globe', CANVAS_W - 244, 24, 210, 50, '↺  Centrar globo', {
+      fontSize: 17,
+      action: () => this.callbacks.onResetGlobePosition(),
+    });
 
     // Section 1: Map Layers
     ctx.fillStyle = '#94a3b8';
-    ctx.font = '600 16px system-ui, sans-serif';
-    ctx.fillText('CAPA DEL MAPA', 38, 108);
+    ctx.font = '600 15px system-ui, sans-serif';
+    ctx.fillText('CAPA DEL MAPA', 36, 94);
 
     const gap = 14;
-    const layerW = (CANVAS_W - 68 - gap * 2) / 3;
-    this.drawButton('layer_hybrid', 34, 124, layerW, 64, 'Híbrido (Satélite + Calles)', {
+    const w3 = (CANVAS_W - 68 - gap * 2) / 3;
+    this.drawButton('layer_hybrid', 34, 108, w3, 58, 'Híbrido (Satélite + Calles)', {
       active: s.layer === 'hybrid',
-      fontSize: 18,
+      fontSize: 17,
       action: () => this.callbacks.onSetLayer('hybrid'),
     });
-    this.drawButton('layer_sat', 34 + layerW + gap, 124, layerW, 64, 'Satélite Puro', {
+    this.drawButton('layer_sat', 34 + w3 + gap, 108, w3, 58, 'Satélite Puro', {
       active: s.layer === 'satellite',
-      fontSize: 18,
+      fontSize: 17,
       action: () => this.callbacks.onSetLayer('satellite'),
     });
-    this.drawButton('layer_streets', 34 + (layerW + gap) * 2, 124, layerW, 64, 'Mapa Callejero', {
+    this.drawButton('layer_streets', 34 + (w3 + gap) * 2, 108, w3, 58, 'Mapa Callejero', {
       active: s.layer === 'streets',
-      fontSize: 18,
+      fontSize: 17,
       action: () => this.callbacks.onSetLayer('streets'),
     });
 
-    // Section 2: Fondo + Tilt fine control + Google Map Tiles toggle
+    // Section 2: Configurable auto-tilt on zoom up to 90° horizontal parallel to the floor
     ctx.fillStyle = '#94a3b8';
-    ctx.font = '600 16px system-ui, sans-serif';
-    ctx.fillText('FONDO, CÁMARA Y PROVEEDOR', 38, 214);
+    ctx.font = '600 15px system-ui, sans-serif';
+    ctx.fillText(
+      `INCLINACIÓN AL ACERCARSE (ACTUAL ${Math.round(s.tiltDeg)}° · 90° = HORIZONTAL PARALELO AL PISO)`,
+      36,
+      188
+    );
 
+    const presetW = 150;
+    const presetGap = 12;
+    const tiltY = 202;
+    const tiltH = 76;
+
+    this.drawButton('tilt_p0', 34, tiltY, presetW, tiltH, '0°', {
+      sublabel: '2D Vertical',
+      active: s.autoTiltMaxDeg === 0,
+      fontSize: 22,
+      action: () => this.callbacks.onSetAutoTiltMax(0),
+    });
+    this.drawButton('tilt_p35', 34 + (presetW + presetGap), tiltY, presetW, tiltH, '35°', {
+      sublabel: 'Suave',
+      active: s.autoTiltMaxDeg > 0 && s.autoTiltMaxDeg <= 45,
+      fontSize: 22,
+      action: () => this.callbacks.onSetAutoTiltMax(35),
+    });
+    this.drawButton('tilt_p65', 34 + (presetW + presetGap) * 2, tiltY, presetW, tiltH, '65°', {
+      sublabel: '3D Alto',
+      active: s.autoTiltMaxDeg > 45 && s.autoTiltMaxDeg < 85,
+      fontSize: 22,
+      action: () => this.callbacks.onSetAutoTiltMax(65),
+    });
+    this.drawButton('tilt_p90', 34 + (presetW + presetGap) * 3, tiltY, presetW, tiltH, '90°', {
+      sublabel: 'Horizontal piso',
+      active: s.autoTiltMaxDeg >= 85,
+      accent: s.autoTiltMaxDeg >= 85 ? 'emerald' : 'slate',
+      fontSize: 22,
+      action: () => this.callbacks.onSetAutoTiltMax(90),
+    });
+
+    this.drawButton('cfg_tilt_up', 684, tiltY, 115, tiltH, '▲ +10°', {
+      sublabel: 'Inclinar',
+      fontSize: 18,
+      action: () => this.callbacks.onAdjustTilt(10),
+    });
+    this.drawButton('cfg_tilt_down', 811, tiltY, 115, tiltH, '▼ −10°', {
+      sublabel: 'Enderezar',
+      fontSize: 18,
+      action: () => this.callbacks.onAdjustTilt(-10),
+    });
+
+    // Section 3: Background + Floor Shadow + Google Map Tiles
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '600 15px system-ui, sans-serif';
+    ctx.fillText('FONDO, SOMBRA EN EL SUELO Y PROVEEDOR', 36, 300);
+
+    const row3Y = 314;
+    const row3H = 84;
     this.drawButton(
       'cfg_bg',
       34,
-      230,
-      300,
-      86,
+      row3Y,
+      w3,
+      row3H,
       s.passthrough ? '👁 Realidad · Passthrough' : '✦ Espacio · Estrellas',
       {
         sublabel: 'Cambiar fondo',
         accent: s.passthrough ? 'violet' : 'slate',
-        fontSize: 18,
+        fontSize: 17,
         action: () => this.callbacks.onTogglePassthrough(),
       }
     );
 
-    this.drawButton('cfg_tilt_up', 348, 230, 134, 86, 'Inclinar ▲', {
-      sublabel: `${Math.round(s.tiltDeg)}°`,
-      fontSize: 18,
-      action: () => this.callbacks.onAdjustTilt(10),
-    });
-    this.drawButton('cfg_tilt_down', 494, 230, 134, 86, 'Inclinar ▼', {
-      sublabel: 'Vertical',
-      fontSize: 18,
-      action: () => this.callbacks.onAdjustTilt(-10),
-    });
+    this.drawButton(
+      'cfg_shadow',
+      34 + w3 + gap,
+      row3Y,
+      w3,
+      row3H,
+      s.floorShadowEnabled ? 'Sombra en suelo: ON' : 'Sombra en suelo: OFF',
+      {
+        sublabel: 'Proyección sobre el piso',
+        active: s.floorShadowEnabled,
+        fontSize: 17,
+        action: () => this.callbacks.onToggleFloorShadow(),
+      }
+    );
 
     const gLabel = s.googleActive
       ? 'Google Map Tiles: ON'
@@ -671,8 +757,8 @@ export class VRSpatialHUD {
         : 'Satélite HD (Por defecto)';
     const gSub = s.googleConfigured
       ? 'Toca para alternar proveedor'
-      : 'Configura API Key en la web 2D';
-    this.drawButton('cfg_google', 642, 230, 284, 86, gLabel, {
+      : 'Configura API Key en web 2D';
+    this.drawButton('cfg_google', 34 + (w3 + gap) * 2, row3Y, w3, row3H, gLabel, {
       sublabel: gSub,
       accent: s.googleActive ? 'emerald' : 'slate',
       fontSize: 17,
@@ -680,12 +766,12 @@ export class VRSpatialHUD {
     });
 
     ctx.fillStyle = '#94a3b8';
-    ctx.font = '500 15px system-ui, sans-serif';
+    ctx.font = '500 14px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(
-      'Nota: Las búsquedas usan OpenStreetMap gratis (nunca Geocoding API)  ·  Pellizca barra ⠿ para mover este panel',
+      'Buscador OpenStreetMap gratis (nunca Geocoding API)  ·  Pellizca barra ⠿ bajo el globo o panel para moverlos',
       CANVAS_W / 2,
-      CANVAS_H - 36
+      CANVAS_H - 28
     );
   }
 

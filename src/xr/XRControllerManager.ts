@@ -12,6 +12,11 @@ export interface XRControllerCallbacks {
   onTestPanelBody: (raycaster: THREE.Raycaster) => boolean;
   onPanelDragMove: (worldPos: THREE.Vector3) => void;
   onPanelDragEnd: () => void;
+  onTestGlobeHandle: (raycaster: THREE.Raycaster) => { point: THREE.Vector3; distance: number } | null;
+  onTestGlobeBody: (raycaster: THREE.Raycaster) => { point: THREE.Vector3; distance: number } | null;
+  onGlobeDragStart: (grabWorldPoint: THREE.Vector3) => void;
+  onGlobeDragMove: (targetWorldPos: THREE.Vector3) => void;
+  onGlobeDragEnd: () => void;
 }
 
 interface ControllerSlot {
@@ -36,8 +41,11 @@ interface ControllerSlot {
   handPinchActive: boolean;
   squeezing: boolean;
   isDraggingPanel: boolean;
+  isDraggingGlobe: boolean;
   isClickingPanel: boolean;
   panelGrabDistance: number;
+  globeGrabDistance: number;
+  globeStartHandPos: THREE.Vector3;
   isDraggingView: boolean;
   dragStartPos: THREE.Vector3;
   lastDragPos: THREE.Vector3;
@@ -102,6 +110,7 @@ export class XRControllerManager {
   private slots: ControllerSlot[] = [];
 
   private passthroughActive = false;
+  private globeMoveMode = false;
   private prevTwoHandDist: number | null = null;
   private prevButtonB = false;
   private prevButtonX = false;
@@ -112,6 +121,7 @@ export class XRControllerManager {
   private readonly tmpPosB = new THREE.Vector3();
   private readonly tmpDelta = new THREE.Vector3();
   private readonly tmpTarget = new THREE.Vector3();
+  private readonly tmpForward = new THREE.Vector3();
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, callbacks: XRControllerCallbacks) {
     this.renderer = renderer;
@@ -209,8 +219,11 @@ export class XRControllerManager {
         handPinchActive: false,
         squeezing: false,
         isDraggingPanel: false,
+        isDraggingGlobe: false,
         isClickingPanel: false,
         panelGrabDistance: 1.0,
+        globeGrabDistance: 2.0,
+        globeStartHandPos: new THREE.Vector3(),
         isDraggingView: false,
         dragStartPos: new THREE.Vector3(),
         lastDragPos: new THREE.Vector3(),
@@ -233,6 +246,7 @@ export class XRControllerManager {
         slot.handPinchActive = false;
         slot.squeezing = false;
         slot.isDraggingPanel = false;
+        slot.isDraggingGlobe = false;
         slot.isClickingPanel = false;
         slot.isDraggingView = false;
         slot.reticleDot.visible = false;
@@ -245,13 +259,25 @@ export class XRControllerManager {
       raySpace.addEventListener('selectstart', () => this.beginPrimarySelect(slot));
       raySpace.addEventListener('selectend', () => this.endPrimarySelect(slot));
 
+      // Touch Plus Grip (Squeeze): grab panel handle OR grab & move the 3D globe directly in space!
       raySpace.addEventListener('squeezestart', () => {
         slot.squeezing = true;
         this.buildRayFromSpace(slot.raySpace, this.raycaster);
+
         const panelHit = this.callbacks.onTestPanelGrab(this.raycaster);
         if (panelHit) {
           slot.isDraggingPanel = true;
           slot.panelGrabDistance = panelHit.distance;
+          return;
+        }
+
+        const globeHandleHit = this.callbacks.onTestGlobeHandle(this.raycaster);
+        const globeBodyHit = globeHandleHit ?? this.callbacks.onTestGlobeBody(this.raycaster);
+        if (globeBodyHit) {
+          slot.isDraggingGlobe = true;
+          slot.globeGrabDistance = THREE.MathUtils.clamp(globeBodyHit.distance, 0.7, 5.0);
+          this.getInteractionPoint(slot, slot.globeStartHandPos);
+          this.callbacks.onGlobeDragStart(globeBodyHit.point);
         } else {
           this.getInteractionPoint(slot, slot.lastDragPos);
         }
@@ -264,6 +290,10 @@ export class XRControllerManager {
           slot.isDraggingPanel = false;
           this.callbacks.onPanelDragEnd();
         }
+        if (slot.isDraggingGlobe) {
+          slot.isDraggingGlobe = false;
+          this.callbacks.onGlobeDragEnd();
+        }
         this.prevTwoHandDist = null;
       });
 
@@ -275,6 +305,10 @@ export class XRControllerManager {
     this.passthroughActive = enabled;
   }
 
+  public setGlobeMoveMode(enabled: boolean): void {
+    this.globeMoveMode = enabled;
+  }
+
   private beginPrimarySelect(slot: ControllerSlot): void {
     if (slot.selectActive) return;
     slot.selectActive = true;
@@ -282,6 +316,8 @@ export class XRControllerManager {
     this.pulseHaptic(slot, 0.3, 22);
 
     this.buildRayFromSpace(slot.raySpace, this.raycaster);
+
+    // 1. Panel grab handle always wins
     const panelHit = this.callbacks.onTestPanelGrab(this.raycaster);
     if (panelHit) {
       slot.isDraggingPanel = true;
@@ -289,8 +325,32 @@ export class XRControllerManager {
       return;
     }
 
+    // 2. Panel body click (never drags globe/view)
     if (this.callbacks.onTestPanelBody(this.raycaster)) {
       slot.isClickingPanel = true;
+      return;
+    }
+
+    // 3. Globe spatial grab handle OR active "Mover globo" mode
+    const globeHandleHit = this.callbacks.onTestGlobeHandle(this.raycaster);
+    if (globeHandleHit) {
+      slot.isDraggingGlobe = true;
+      slot.globeGrabDistance = THREE.MathUtils.clamp(globeHandleHit.distance, 0.7, 5.0);
+      this.getInteractionPoint(slot, slot.globeStartHandPos);
+      this.callbacks.onGlobeDragStart(globeHandleHit.point);
+      return;
+    }
+
+    if (this.globeMoveMode) {
+      const globeHit = this.callbacks.onTestGlobeBody(this.raycaster);
+      const dist = globeHit ? THREE.MathUtils.clamp(globeHit.distance, 0.75, 5.0) : 2.05;
+      const point =
+        globeHit?.point ??
+        this.raycaster.ray.origin.clone().addScaledVector(this.raycaster.ray.direction, dist);
+      slot.isDraggingGlobe = true;
+      slot.globeGrabDistance = dist;
+      this.getInteractionPoint(slot, slot.globeStartHandPos);
+      this.callbacks.onGlobeDragStart(point);
       return;
     }
 
@@ -306,6 +366,12 @@ export class XRControllerManager {
     if (slot.isDraggingPanel) {
       slot.isDraggingPanel = false;
       this.callbacks.onPanelDragEnd();
+      return;
+    }
+
+    if (slot.isDraggingGlobe) {
+      slot.isDraggingGlobe = false;
+      this.callbacks.onGlobeDragEnd();
       return;
     }
 
@@ -349,10 +415,11 @@ export class XRControllerManager {
   public setSlotHitFeedback(index: number, hitPoint: THREE.Vector3 | null, highlight = false): void {
     const slot = this.slots[index];
     if (!slot) return;
+    const isSpatialGrab = slot.isDraggingPanel || slot.isDraggingGlobe;
     if (hitPoint) {
       slot.reticleDot.position.copy(hitPoint);
       slot.reticleDot.visible = true;
-      slot.laserMat.color.setHex(slot.isDraggingPanel ? 0x34d399 : highlight ? 0x34d399 : 0x38bdf8);
+      slot.laserMat.color.setHex(isSpatialGrab ? 0x34d399 : highlight ? 0x34d399 : 0x38bdf8);
       const origin = new THREE.Vector3();
       slot.raySpace.getWorldPosition(origin);
       const dist = Math.max(0.15, Math.min(12, origin.distanceTo(hitPoint)));
@@ -361,7 +428,7 @@ export class XRControllerManager {
       posAttr.needsUpdate = true;
     } else {
       slot.reticleDot.visible = false;
-      slot.laserMat.color.setHex(slot.selectActive ? 0x34d399 : 0x38bdf8);
+      slot.laserMat.color.setHex(isSpatialGrab || slot.selectActive ? 0x34d399 : 0x38bdf8);
       const posAttr = slot.laserLine.geometry.getAttribute('position') as THREE.BufferAttribute;
       posAttr.setXYZ(1, 0, 0, -4.5);
       posAttr.needsUpdate = true;
@@ -457,6 +524,7 @@ export class XRControllerManager {
       this.updateHandJointsAndPinch(slot);
     }
 
+    // Priority 1: Dragging 3D control panel
     for (const slot of this.slots) {
       if (slot.isDraggingPanel) {
         this.buildRayFromSpace(slot.raySpace, this.raycaster);
@@ -473,7 +541,16 @@ export class XRControllerManager {
     const active0 = (s0.selectActive && !s0.isClickingPanel) || s0.squeezing;
     const active1 = (s1.selectActive && !s1.isClickingPanel) || s1.squeezing;
 
+    // Priority 2: Two-hand spread / pinch-out zoom always overrides single-hand globe drag!
     if (active0 && active1) {
+      if (s0.isDraggingGlobe) {
+        s0.isDraggingGlobe = false;
+        this.callbacks.onGlobeDragEnd();
+      }
+      if (s1.isDraggingGlobe) {
+        s1.isDraggingGlobe = false;
+        this.callbacks.onGlobeDragEnd();
+      }
       s0.isDraggingView = true;
       s1.isDraggingView = true;
       this.getInteractionPoint(s0, this.tmpPosA);
@@ -490,20 +567,44 @@ export class XRControllerManager {
       s1.lastDragPos.copy(this.tmpPosB);
     } else {
       this.prevTwoHandDist = null;
-      const activeSlot = active0 ? s0 : active1 ? s1 : null;
-      if (activeSlot) {
-        this.getInteractionPoint(activeSlot, this.tmpPosA);
-        const totalMove = this.tmpPosA.distanceTo(activeSlot.dragStartPos);
-        if (!activeSlot.isDraggingView && (activeSlot.squeezing || totalMove > DRAG_THRESHOLD_M)) {
-          activeSlot.isDraggingView = true;
-          activeSlot.lastDragPos.copy(this.tmpPosA);
-        }
-        if (activeSlot.isDraggingView) {
-          this.tmpDelta.subVectors(this.tmpPosA, activeSlot.lastDragPos);
-          if (this.tmpDelta.lengthSq() > 0.0000008) {
-            this.callbacks.onRotateViewDrag(this.tmpDelta);
+
+      // Priority 3: Single-hand dragging 3D Globe freely in space (supports push/pull depth too!)
+      const globeSlot = s0.isDraggingGlobe ? s0 : s1.isDraggingGlobe ? s1 : null;
+      if (globeSlot) {
+        this.buildRayFromSpace(globeSlot.raySpace, this.raycaster);
+        this.getInteractionPoint(globeSlot, this.tmpPosA);
+        this.tmpDelta.subVectors(this.tmpPosA, globeSlot.globeStartHandPos);
+
+        const cam = this.renderer.xr.getCamera();
+        cam.getWorldDirection(this.tmpForward);
+        const depthPush = this.tmpDelta.dot(this.tmpForward) * 2.4;
+        const dynamicDist = THREE.MathUtils.clamp(
+          globeSlot.globeGrabDistance + depthPush,
+          0.65,
+          5.2
+        );
+
+        this.tmpTarget
+          .copy(this.raycaster.ray.origin)
+          .addScaledVector(this.raycaster.ray.direction, dynamicDist);
+        this.callbacks.onGlobeDragMove(this.tmpTarget);
+      } else {
+        // Priority 4: Single-hand pinch + drag to rotate planet
+        const activeSlot = active0 ? s0 : active1 ? s1 : null;
+        if (activeSlot) {
+          this.getInteractionPoint(activeSlot, this.tmpPosA);
+          const totalMove = this.tmpPosA.distanceTo(activeSlot.dragStartPos);
+          if (!activeSlot.isDraggingView && totalMove > DRAG_THRESHOLD_M) {
+            activeSlot.isDraggingView = true;
+            activeSlot.lastDragPos.copy(this.tmpPosA);
           }
-          activeSlot.lastDragPos.copy(this.tmpPosA);
+          if (activeSlot.isDraggingView) {
+            this.tmpDelta.subVectors(this.tmpPosA, activeSlot.lastDragPos);
+            if (this.tmpDelta.lengthSq() > 0.0000008) {
+              this.callbacks.onRotateViewDrag(this.tmpDelta);
+            }
+            activeSlot.lastDragPos.copy(this.tmpPosA);
+          }
         }
       }
     }

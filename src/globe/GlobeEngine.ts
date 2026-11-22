@@ -166,8 +166,110 @@ function createStarfield(): THREE.Points {
 }
 
 /**
+ * Soft multi-layered contact + penumbra floor shadow texture.
+ * Works directly on top of the user's real physical floor in WebXR Passthrough (immersive-ar)
+ * AND on top of the subtle floor stage pad in Space / Desktop mode.
+ */
+function createFloorShadowTexture(): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const half = size / 2;
+
+  const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  grad.addColorStop(0.0, 'rgba(0, 0, 0, 0.90)');
+  grad.addColorStop(0.24, 'rgba(0, 0, 0, 0.72)');
+  grad.addColorStop(0.48, 'rgba(0, 0, 0, 0.38)');
+  grad.addColorStop(0.74, 'rgba(0, 0, 0, 0.11)');
+  grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * Subtle illuminated virtual floor stage for Space / Desktop mode so the cast shadow
+ * of the floating globe is clearly visible on the floor plane (hidden automatically in Passthrough).
+ */
+function createFloorStageTexture(): THREE.CanvasTexture {
+  const size = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const half = size / 2;
+
+  const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  grad.addColorStop(0.0, 'rgba(96, 165, 250, 0.24)');
+  grad.addColorStop(0.35, 'rgba(56, 130, 215, 0.16)');
+  grad.addColorStop(0.68, 'rgba(20, 45, 86, 0.08)');
+  grad.addColorStop(1.0, 'rgba(3, 7, 18, 0.0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+
+  // Subtle spatial depth rings on virtual floor
+  ctx.strokeStyle = 'rgba(125, 211, 252, 0.13)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(half, half, half * 0.42, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(125, 211, 252, 0.07)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(half, half, half * 0.72, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function createGlobeHandleTexture(grabbed: boolean, hovered: boolean): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 420;
+  canvas.height = 76;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = grabbed
+    ? 'rgba(16, 185, 129, 0.94)'
+    : hovered
+      ? 'rgba(14, 165, 233, 0.92)'
+      : 'rgba(15, 23, 42, 0.78)';
+  ctx.strokeStyle = grabbed ? '#6ee7b7' : hovered ? '#7dd3fc' : 'rgba(125, 211, 252, 0.5)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(12, 10, canvas.width - 24, canvas.height - 20, 28);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 22px system-ui, -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(
+    grabbed ? '✋  MOVIENDO GLOBO EN 3D...' : '⠿  MOVER GLOBO EN EL ESPACIO',
+    canvas.width / 2,
+    canvas.height / 2 + 1
+  );
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/**
  * Builds an exact unit-sphere (r = 1.0) Mercator-projected patch centered around its float64 centerUnit.
- * Keeping r = 1.0 strictly prevents radial blow-up at street-level zoom (when visualRadiusM > 50,000 m)!
+ * Keeping r = 1.0 strictly prevents radial blow-up at street-level zoom (when visualRadiusM > 50,000 m).
  */
 function buildTileGeometry(
   z: number,
@@ -240,6 +342,7 @@ export class GlobeEngine {
   public readonly tileGroup = new THREE.Group();
   public readonly starfield: THREE.Points;
   public readonly spaceSkyDome: THREE.Mesh;
+  public readonly globeHandleMesh: THREE.Mesh;
 
   private tileManager: TileManager;
   private activeTiles = new Map<string, TileMeshEntry>();
@@ -250,6 +353,19 @@ export class GlobeEngine {
   private cloudMesh: THREE.Mesh;
   private cloudMat: THREE.MeshBasicMaterial;
   private reticleRing: THREE.Mesh;
+
+  private floorStageMesh: THREE.Mesh;
+  private floorStageMat: THREE.MeshBasicMaterial;
+  private floorShadowMesh: THREE.Mesh;
+  private floorShadowMat: THREE.MeshBasicMaterial;
+
+  private globeHandleMat: THREE.MeshBasicMaterial;
+  private handleTexIdle: THREE.CanvasTexture;
+  private handleTexHover: THREE.CanvasTexture;
+  private handleTexActive: THREE.CanvasTexture;
+  private isHandleGrabbed = false;
+  private isHandleHovered = false;
+  private showGlobeHandle = false;
 
   private state: GlobeState = {
     lat: 16,
@@ -263,6 +379,14 @@ export class GlobeEngine {
   private layer: MapLayer = 'hybrid';
   private useGoogle = false;
   private is3DTiltEnabled = true;
+  private autoTiltMaxDeg = 45;
+  private floorShadowEnabled = true;
+  private passthroughEnabled = false;
+
+  private readonly defaultGlobeAnchor = new THREE.Vector3(0, ANCHOR_Y_M, -FOCUS_DIST_M);
+  private globeAnchor = new THREE.Vector3(0, ANCHOR_Y_M, -FOCUS_DIST_M);
+  private targetGlobeAnchor = new THREE.Vector3(0, ANCHOR_Y_M, -FOCUS_DIST_M);
+
   private flyAnim: FlyAnimation | null = null;
   private anchorUnit = new THREE.Vector3(0, 0, 1);
   private visualRadiusM = 0.95;
@@ -273,6 +397,8 @@ export class GlobeEngine {
   private readonly tmpQuatX = new THREE.Quaternion();
   private readonly tmpQuatH = new THREE.Quaternion();
   private readonly tmpQuatT = new THREE.Quaternion();
+  private readonly tmpVecA = new THREE.Vector3();
+  private readonly tmpVecB = new THREE.Vector3();
   private readonly axisX = new THREE.Vector3(1, 0, 0);
   private readonly axisY = new THREE.Vector3(0, 1, 0);
   private readonly axisZ = new THREE.Vector3(0, 0, 1);
@@ -291,9 +417,40 @@ export class GlobeEngine {
     this.root.add(this.spaceSkyDome);
 
     this.starfield = createStarfield();
+    this.starfield.renderOrder = -55;
     this.root.add(this.starfield);
 
-    this.globeGroup.position.set(0, ANCHOR_Y_M, -FOCUS_DIST_M);
+    // Subtle virtual floor stage (Space / Desktop mode only — hidden in Passthrough)
+    const stageGeo = new THREE.PlaneGeometry(1, 1);
+    this.floorStageMat = new THREE.MeshBasicMaterial({
+      map: createFloorStageTexture(),
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.floorStageMesh = new THREE.Mesh(stageGeo, this.floorStageMat);
+    this.floorStageMesh.rotation.x = -Math.PI / 2;
+    this.floorStageMesh.position.set(0, 0.001, -FOCUS_DIST_M - 0.95);
+    this.floorStageMesh.renderOrder = -15;
+    this.root.add(this.floorStageMesh);
+
+    // Grounded contact + penumbra floor shadow at y = 0 (user's physical floor in Quest 3 local-floor!)
+    const shadowGeo = new THREE.PlaneGeometry(1, 1);
+    this.floorShadowMat = new THREE.MeshBasicMaterial({
+      map: createFloorShadowTexture(),
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.floorShadowMesh = new THREE.Mesh(shadowGeo, this.floorShadowMat);
+    this.floorShadowMesh.rotation.x = -Math.PI / 2;
+    this.floorShadowMesh.position.set(0, 0.002, -FOCUS_DIST_M - 0.95);
+    this.floorShadowMesh.renderOrder = -14;
+    this.root.add(this.floorShadowMesh);
+
+    this.globeGroup.position.copy(this.globeAnchor);
     this.root.add(this.globeGroup);
     this.globeGroup.add(this.tileGroup);
 
@@ -346,6 +503,23 @@ export class GlobeEngine {
     this.reticleRing.renderOrder = 30;
     this.root.add(this.reticleRing);
 
+    // Spatial 3D grab handle pill below the globe (shown in XR sessions)
+    this.handleTexIdle = createGlobeHandleTexture(false, false);
+    this.handleTexHover = createGlobeHandleTexture(false, true);
+    this.handleTexActive = createGlobeHandleTexture(true, true);
+    this.globeHandleMat = new THREE.MeshBasicMaterial({
+      map: this.handleTexIdle,
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+      depthTest: true,
+    });
+    const handleGeo = new THREE.PlaneGeometry(0.46, 0.083);
+    this.globeHandleMesh = new THREE.Mesh(handleGeo, this.globeHandleMat);
+    this.globeHandleMesh.renderOrder = 38;
+    this.globeHandleMesh.visible = false;
+    this.root.add(this.globeHandleMesh);
+
     this.applyGlobeTransform();
     this.syncTiles(true);
   }
@@ -366,6 +540,14 @@ export class GlobeEngine {
     return this.is3DTiltEnabled;
   }
 
+  public getAutoTiltMaxDeg(): number {
+    return this.autoTiltMaxDeg;
+  }
+
+  public isFloorShadowEnabled(): boolean {
+    return this.floorShadowEnabled;
+  }
+
   public getAnchorUnit(): THREE.Vector3 {
     return this.anchorUnit;
   }
@@ -374,9 +556,102 @@ export class GlobeEngine {
     return this.visualRadiusM;
   }
 
+  public getGlobeWorldPosition(out = new THREE.Vector3()): THREE.Vector3 {
+    return out.copy(this.globeGroup.position);
+  }
+
+  public setGlobeHandleVisible(visible: boolean): void {
+    this.showGlobeHandle = visible;
+    this.globeHandleMesh.visible = visible;
+  }
+
+  public hitTestGlobeHandle(
+    raycaster: THREE.Raycaster
+  ): { point: THREE.Vector3; distance: number } | null {
+    if (!this.globeHandleMesh.visible) return null;
+    const hits = raycaster.intersectObject(this.globeHandleMesh, false);
+    if (hits.length === 0) return null;
+    return { point: hits[0].point.clone(), distance: hits[0].distance };
+  }
+
+  public setGlobeHandleState(grabbed: boolean, hovered: boolean): void {
+    if (this.isHandleGrabbed === grabbed && this.isHandleHovered === hovered) return;
+    this.isHandleGrabbed = grabbed;
+    this.isHandleHovered = hovered;
+    this.globeHandleMat.map = grabbed
+      ? this.handleTexActive
+      : hovered
+        ? this.handleTexHover
+        : this.handleTexIdle;
+    this.globeHandleMat.needsUpdate = true;
+  }
+
+  public setGlobeHandleHover(hovered: boolean): void {
+    this.setGlobeHandleState(this.isHandleGrabbed, hovered);
+  }
+
+  /**
+   * Moves the 3D globe freely anywhere in the user's physical/virtual space.
+   * Clamps gently so the globe stays reachable and never clips under the user's floor (y = 0).
+   */
+  public moveGlobeToWorldPosition(targetEffectivePos: THREE.Vector3, referenceCam?: THREE.Camera): void {
+    const camPos = this.tmpVecB.set(0, ANCHOR_Y_M, 0);
+    if (referenceCam) {
+      referenceCam.getWorldPosition(camPos);
+    }
+
+    const offset = this.tmpVecA.copy(targetEffectivePos).sub(camPos);
+    const horizDist = Math.hypot(offset.x, offset.z);
+    if (horizDist > 5.5) {
+      const scale = 5.5 / horizDist;
+      offset.x *= scale;
+      offset.z *= scale;
+    } else if (horizDist < 0.55) {
+      if (horizDist < 0.001) {
+        offset.set(0, offset.y, -1.2);
+      } else {
+        const scale = 0.55 / horizDist;
+        offset.x *= scale;
+        offset.z *= scale;
+      }
+    }
+
+    const tiltDrop = this.computeTiltVerticalDrop();
+    const minEffY = this.state.altitudeKm > 350 ? Math.min(1.02, this.visualRadiusM + 0.04) : 0.16;
+    const clampedEffY = THREE.MathUtils.clamp(camPos.y + offset.y, minEffY, 2.55);
+
+    this.targetGlobeAnchor.set(
+      camPos.x + offset.x,
+      clampedEffY - tiltDrop,
+      camPos.z + offset.z
+    );
+  }
+
+  public nudgeGlobeWorldPosition(dx: number, dy: number, dz: number): void {
+    const next = this.getEffectiveGlobePos(this.tmpVecA).add(new THREE.Vector3(dx, dy, dz));
+    const minEffY = this.state.altitudeKm > 350 ? Math.min(1.02, this.visualRadiusM + 0.04) : 0.16;
+    const tiltDrop = this.computeTiltVerticalDrop();
+    this.targetGlobeAnchor.set(
+      THREE.MathUtils.clamp(next.x, -4.5, 4.5),
+      THREE.MathUtils.clamp(next.y, minEffY, 2.55) - tiltDrop,
+      THREE.MathUtils.clamp(next.z, -5.5, -0.65)
+    );
+  }
+
+  public resetGlobePosition(): void {
+    this.targetGlobeAnchor.copy(this.defaultGlobeAnchor);
+  }
+
+  public setFloorShadowEnabled(enabled: boolean): void {
+    this.floorShadowEnabled = enabled;
+    this.updateFloorShadow();
+  }
+
   public setPassthroughMode(enabled: boolean): void {
+    this.passthroughEnabled = enabled;
     this.spaceSkyDome.visible = !enabled;
     this.starfield.visible = !enabled;
+    this.updateFloorShadow();
   }
 
   public setGoogleMode(enabled: boolean): void {
@@ -391,12 +666,28 @@ export class GlobeEngine {
     this.reloadAllTiles(false);
   }
 
+  public setAutoTiltMaxDeg(deg: number): void {
+    const clamped = THREE.MathUtils.clamp(Math.round(deg), 0, 90);
+    this.autoTiltMaxDeg = clamped;
+    this.is3DTiltEnabled = clamped > 0;
+    if (clamped === 0) {
+      this.targetState.tiltDeg = 0;
+    } else if (this.targetState.tiltDeg > clamped) {
+      this.targetState.tiltDeg = clamped;
+    }
+  }
+
   public toggle3DTilt(): boolean {
     this.is3DTiltEnabled = !this.is3DTiltEnabled;
     if (!this.is3DTiltEnabled) {
       this.targetState.tiltDeg = 0;
-    } else if (this.state.altitudeKm < 60) {
-      this.targetState.tiltDeg = 32;
+    } else {
+      if (this.autoTiltMaxDeg <= 0) {
+        this.autoTiltMaxDeg = 45;
+      }
+      if (this.state.altitudeKm < 90) {
+        this.targetState.tiltDeg = Math.min(this.autoTiltMaxDeg, Math.max(32, this.targetState.tiltDeg));
+      }
     }
     return this.is3DTiltEnabled;
   }
@@ -404,7 +695,20 @@ export class GlobeEngine {
   public adjustTilt(deltaDeg: number): void {
     this.isSpinningIdle = false;
     this.is3DTiltEnabled = true;
-    this.targetState.tiltDeg = THREE.MathUtils.clamp(this.targetState.tiltDeg + deltaDeg, 0, 56);
+    const baseTilt = Math.max(this.targetState.tiltDeg, this.state.tiltDeg);
+    this.targetState.tiltDeg = THREE.MathUtils.clamp(baseTilt + deltaDeg, 0, 90);
+  }
+
+  public setImmediateTilt(deg: number): void {
+    const clamped = THREE.MathUtils.clamp(deg, 0, 90);
+    this.is3DTiltEnabled = clamped > 0;
+    if (clamped > this.autoTiltMaxDeg) {
+      this.autoTiltMaxDeg = Math.round(clamped);
+    }
+    this.state.tiltDeg = clamped;
+    this.targetState.tiltDeg = clamped;
+    this.applyGlobeTransform();
+    this.syncTiles(true);
   }
 
   public resetNorth(): void {
@@ -418,6 +722,8 @@ export class GlobeEngine {
     this.state.lon = wrapLon(lon);
     this.state.altitudeKm = THREE.MathUtils.clamp(altitudeKm, MIN_ALTITUDE_KM, MAX_ALTITUDE_KM);
     this.targetState = { ...this.state };
+    const autoTilt = this.computeAutoTiltTarget();
+    this.state.tiltDeg = Math.max(autoTilt, this.targetState.tiltDeg);
     this.applyGlobeTransform();
     this.syncTiles(true);
   }
@@ -442,7 +748,6 @@ export class GlobeEngine {
   public panByDegrees(dLat: number, dLon: number): void {
     this.isSpinningIdle = false;
     this.flyAnim = null;
-    // Account for camera heading so dragging always aligns with screen directions
     const hRad = this.state.headingDeg * DEG2RAD;
     const cosH = Math.cos(hRad);
     const sinH = Math.sin(hRad);
@@ -459,7 +764,6 @@ export class GlobeEngine {
     const nextAlt = THREE.MathUtils.clamp(prevAlt * factor, MIN_ALTITUDE_KM, MAX_ALTITUDE_KM);
     this.targetState.altitudeKm = nextAlt;
 
-    // Google Earth-style zoom toward cursor point when zooming in
     if (factor < 1 && typeof towardLat === 'number' && typeof towardLon === 'number') {
       const pull = THREE.MathUtils.clamp((1 - factor) * 0.55, 0, 0.28);
       this.targetState.lat = clampLat(this.targetState.lat + (towardLat - this.targetState.lat) * pull);
@@ -478,6 +782,7 @@ export class GlobeEngine {
     this.flyTo(16, -52, 13800, 1.5);
     this.targetState.headingDeg = 0;
     this.targetState.tiltDeg = 0;
+    this.resetGlobePosition();
   }
 
   public flyTo(
@@ -516,10 +821,6 @@ export class GlobeEngine {
     this.targetState.altitudeKm = clampedAlt;
   }
 
-  /**
-   * Projects a unit sphere vector into globeGroup local space with a fixed world-space lift (meters),
-   * never scaled by visualRadiusM — guarantees pins stay glued to streets at every zoom level!
-   */
   public unitToGlobeLocal(
     unitVec: THREE.Vector3,
     worldLiftMeters = 0.008,
@@ -535,7 +836,8 @@ export class GlobeEngine {
 
   public raycastGlobe(
     raycaster: THREE.Raycaster
-  ): { lat: number; lon: number; worldPoint: THREE.Vector3 } | null {
+  ): { lat: number; lon: number; worldPoint: THREE.Vector3; distance: number } | null {
+    this.globeGroup.updateMatrixWorld();
     const centerWorld = this.anchorUnit.clone().multiplyScalar(-this.visualRadiusM);
     this.globeGroup.localToWorld(centerWorld);
     const sphere = new THREE.Sphere(centerWorld, this.visualRadiusM);
@@ -550,10 +852,41 @@ export class GlobeEngine {
       localHit.z / this.visualRadiusM + this.anchorUnit.z
     ).normalize();
     const { lat, lon } = unitVecToLatLon(unitVec);
-    return { lat, lon, worldPoint: hitWorld };
+    return {
+      lat,
+      lon,
+      worldPoint: hitWorld,
+      distance: raycaster.ray.origin.distanceTo(hitWorld),
+    };
   }
 
-  public update(dt: number, elapsedSec: number): void {
+  private computeAutoTiltTarget(): number {
+    if (!this.is3DTiltEnabled || this.autoTiltMaxDeg <= 0) return 0;
+    // Smooth logarithmic descent from 100 km down to 1.0 km reaching full configured angle (up to 90° horizontal!)
+    const logAlt = Math.log(Math.max(MIN_ALTITUDE_KM, this.state.altitudeKm));
+    const logLow = Math.log(1.0);
+    const logHigh = Math.log(100);
+    const progress = 1 - THREE.MathUtils.smoothstep(logAlt, logLow, logHigh);
+    return progress * this.autoTiltMaxDeg;
+  }
+
+  /**
+   * Gently lowers the horizontal map plane below eye height as tilt approaches 90°
+   * so a completely horizontal (parallel to floor) view unfolds like a natural tabletop/horizon
+   * instead of slicing edge-on across eye level.
+   */
+  private computeTiltVerticalDrop(): number {
+    const sinT = Math.sin(this.state.tiltDeg * DEG2RAD);
+    return -0.56 * Math.pow(Math.max(0, sinT), 1.35);
+  }
+
+  private getEffectiveGlobePos(out: THREE.Vector3): THREE.Vector3 {
+    const minEffY = this.state.altitudeKm > 350 ? Math.min(1.02, this.visualRadiusM + 0.04) : 0.16;
+    const effY = Math.max(minEffY, this.globeAnchor.y + this.computeTiltVerticalDrop());
+    return out.set(this.globeAnchor.x, effY, this.globeAnchor.z);
+  }
+
+  public update(dt: number, elapsedSec: number, activeCamera?: THREE.Camera): void {
     const safeDt = Math.min(0.05, Math.max(0.001, dt));
 
     if (this.flyAnim) {
@@ -600,20 +933,38 @@ export class GlobeEngine {
       this.state.headingDeg += dH * smooth;
     }
 
-    // Google Earth automatic gentle 3D perspective tilt as you descend over a city
-    const autoTiltTarget = this.is3DTiltEnabled
-      ? (1 - THREE.MathUtils.smoothstep(this.state.altitudeKm, 1.0, 45)) * 28
+    // Smoothly move 3D spatial anchor when repositioned by the user
+    const posSmooth = 1 - Math.exp(-12 * safeDt);
+    this.globeAnchor.lerp(this.targetGlobeAnchor, posSmooth);
+
+    // Smoothly straighten manual tilt back to upright when zooming all the way out to space orbit
+    if (this.state.altitudeKm > 350 && this.targetState.tiltDeg > 0) {
+      const orbitDecay = 1 - Math.exp(-3.5 * safeDt);
+      this.targetState.tiltDeg *= 1 - orbitDecay;
+      if (this.targetState.tiltDeg < 0.25) this.targetState.tiltDeg = 0;
+    }
+
+    const autoTiltTarget = this.computeAutoTiltTarget();
+    const desiredTilt = this.is3DTiltEnabled
+      ? Math.max(autoTiltTarget, this.targetState.tiltDeg)
       : 0;
-    const desiredTilt = Math.max(autoTiltTarget, this.targetState.tiltDeg);
     const tiltSmooth = 1 - Math.exp(-7 * safeDt);
     this.state.tiltDeg += (desiredTilt - this.state.tiltDeg) * tiltSmooth;
 
     this.applyGlobeTransform();
+    this.updateFloorShadow();
+    this.updateGlobeHandle(activeCamera);
 
     this.cloudMesh.rotation.y = elapsedSec * 0.008;
     const cloudFade = THREE.MathUtils.smoothstep(this.state.altitudeKm, 900, 3800);
     this.cloudMat.opacity = 0.34 * cloudFade;
     this.cloudMesh.visible = cloudFade > 0.01;
+
+    // Fade out coarse coreSphere at low city altitudes so its 48x36 facets never peek behind 90° horizontal terrain
+    const coreFade = THREE.MathUtils.smoothstep(this.state.altitudeKm, 15, 65);
+    const coreMat = this.coreSphere.material as THREE.MeshBasicMaterial;
+    coreMat.opacity = coreFade;
+    this.coreSphere.visible = coreFade > 0.01;
 
     const atmoFade = THREE.MathUtils.smoothstep(this.state.altitudeKm, 450, 2600);
     this.atmosphereMat.uniforms.uOpacity.value = atmoFade;
@@ -638,9 +989,80 @@ export class GlobeEngine {
     }
   }
 
+  private updateFloorShadow(): void {
+    if (!this.floorShadowEnabled) {
+      this.floorShadowMesh.visible = false;
+      this.floorStageMesh.visible = false;
+      return;
+    }
+
+    this.globeGroup.updateMatrixWorld();
+    const sphereCenterWorld = this.tmpVecA
+      .copy(this.anchorUnit)
+      .multiplyScalar(-this.visualRadiusM);
+    this.globeGroup.localToWorld(sphereCenterWorld);
+
+    // Smoothly transition shadow center from sphere center (floating planet) to map focus (zoomed city)
+    const cityBlend = THREE.MathUtils.smoothstep(this.visualRadiusM, 1.5, 4.5);
+    const shadowX = THREE.MathUtils.lerp(sphereCenterWorld.x, this.globeGroup.position.x, cityBlend);
+    const shadowZ = THREE.MathUtils.lerp(sphereCenterWorld.z, this.globeGroup.position.z, cityBlend);
+
+    const planetClearance = Math.max(0.02, sphereCenterWorld.y - this.visualRadiusM);
+    const mapClearance = Math.max(0.02, this.globeGroup.position.y);
+    const heightAboveFloor = THREE.MathUtils.lerp(planetClearance, mapClearance, cityBlend);
+
+    const baseFootprint = THREE.MathUtils.lerp(
+      Math.min(1.65, this.visualRadiusM * 1.18),
+      2.35,
+      cityBlend
+    );
+    // Physical penumbra: grows wider & softer as globe rises higher above the floor
+    const shadowDiameter = baseFootprint * 2.0 * (0.94 + heightAboveFloor * 0.36);
+    const heightOpacity = THREE.MathUtils.clamp(1.06 - heightAboveFloor * 0.24, 0.24, 0.94);
+
+    this.floorShadowMesh.visible = true;
+    this.floorShadowMesh.position.set(shadowX, 0.002, shadowZ);
+    this.floorShadowMesh.scale.set(shadowDiameter, shadowDiameter, 1);
+    this.floorShadowMat.opacity = this.passthroughEnabled
+      ? heightOpacity * 0.84
+      : heightOpacity * 0.95;
+
+    // Subtle illuminated floor stage only in Space / Desktop mode so the dark cast shadow pops cleanly
+    this.floorStageMesh.visible = !this.passthroughEnabled;
+    if (this.floorStageMesh.visible) {
+      const stageDiameter = shadowDiameter * 2.15;
+      this.floorStageMesh.position.set(shadowX, 0.001, shadowZ);
+      this.floorStageMesh.scale.set(stageDiameter, stageDiameter, 1);
+      this.floorStageMat.opacity = THREE.MathUtils.clamp(0.95 - heightAboveFloor * 0.16, 0.35, 0.95);
+    }
+  }
+
+  private updateGlobeHandle(activeCamera?: THREE.Camera): void {
+    this.globeHandleMesh.visible = this.showGlobeHandle;
+    if (!this.showGlobeHandle) return;
+
+    const effPos = this.globeGroup.position;
+    const isPlanet = this.state.altitudeKm > 250;
+    const dropY = isPlanet ? Math.min(0.84, this.visualRadiusM * 0.72) + 0.14 : 0.18;
+    const forwardZ = isPlanet ? 0.12 : 0.48;
+
+    this.globeHandleMesh.position.set(
+      effPos.x,
+      Math.max(0.14, effPos.y - dropY),
+      effPos.z + forwardZ
+    );
+
+    if (activeCamera) {
+      activeCamera.getWorldPosition(this.tmpVecB);
+      this.globeHandleMesh.lookAt(this.tmpVecB.x, this.globeHandleMesh.position.y, this.tmpVecB.z);
+    }
+  }
+
   private applyGlobeTransform(): void {
     latLonToUnitVec(this.state.lat, this.state.lon, this.anchorUnit);
     this.visualRadiusM = FOCUS_DIST_M * (EARTH_RADIUS_KM / this.state.altitudeKm);
+
+    this.getEffectiveGlobePos(this.globeGroup.position);
 
     this.tmpQuatY.setFromAxisAngle(this.axisY, -this.state.lon * DEG2RAD);
     this.tmpQuatX.setFromAxisAngle(this.axisX, this.state.lat * DEG2RAD);
@@ -652,6 +1074,15 @@ export class GlobeEngine {
       .multiply(this.tmpQuatH)
       .multiply(this.tmpQuatX)
       .multiply(this.tmpQuatY);
+
+    // Keep ground reticle aligned with the globe's movable anchor AND flat along the tilted surface!
+    const tiltRad = this.state.tiltDeg * DEG2RAD;
+    this.reticleRing.position.set(
+      this.globeGroup.position.x,
+      this.globeGroup.position.y + Math.sin(tiltRad) * 0.015,
+      this.globeGroup.position.z + Math.cos(tiltRad) * 0.015
+    );
+    this.reticleRing.rotation.set(-tiltRad, 0, 0);
 
     const cx = -this.anchorUnit.x * this.visualRadiusM;
     const cy = -this.anchorUnit.y * this.visualRadiusM;
@@ -678,7 +1109,6 @@ export class GlobeEngine {
 
   private computeDesiredZoom(): number {
     const cosLat = Math.max(0.2, Math.cos(this.state.lat * DEG2RAD));
-    // Crisp Google Earth tile resolution (~6-8 tiles across viewport)
     const rawZ = Math.log2((40075 * cosLat) / (this.state.altitudeKm * 0.2));
     return THREE.MathUtils.clamp(Math.round(rawZ), 2, 18);
   }
@@ -721,19 +1151,30 @@ export class GlobeEngine {
       }
     };
 
-    // 1) Enqueue razor-sharp targetZ FIRST (priority 0..) covering full widescreen viewport!
+    // 1) Razor-sharp targetZ FIRST (priority 0..4.5)
     if (targetZ >= 3) {
       const span = targetZ <= 4 ? 3 : 4;
       addRing(targetZ, span, 0, true);
     }
 
-    // 2) Lightweight satellite-only bridge layer for far tilted horizon & seamless flights
+    // 2) Lightweight satellite bridge layer — interleaved right after center targetZ so surroundings fill fast!
     if (targetZ >= 6) {
       const bridgeZ = Math.max(4, targetZ - 3);
-      addRing(bridgeZ, 3, 40, false);
+      const bridgeSpan = this.state.tiltDeg > 45 ? 3 : 3;
+      addRing(bridgeZ, bridgeSpan, this.state.tiltDeg > 38 ? 1.2 : 12, false);
     }
 
-    // 3) Base world shell z=2 (priority 120, labels only when zoomed out!)
+    // 3) Mid & far horizon satellite rings when tilted steeply (up to 90° horizontal parallel to the floor!)
+    if (targetZ >= 9 && this.state.tiltDeg > 38) {
+      const horizonZ = Math.max(4, targetZ - 6);
+      addRing(horizonZ, 2, 2.0, false);
+    }
+    if (targetZ >= 12 && this.state.tiltDeg > 55) {
+      const farZ = Math.max(3, targetZ - 9);
+      addRing(farZ, 1, 2.5, false);
+    }
+
+    // 4) Base world shell z=2 (priority 120)
     addRing(2, 2, 120, targetZ <= 3);
 
     for (const [key, entry] of this.activeTiles) {
@@ -745,7 +1186,6 @@ export class GlobeEngine {
       }
     }
 
-    // ALWAYS prune stale out-of-view requests BEFORE pumping so rapid flights never clog the queue!
     this.tileManager.pruneQueue(desiredKeys);
     this.tileManager.flushQueue();
   }
@@ -769,9 +1209,6 @@ export class GlobeEngine {
       this.useGoogle
     );
 
-    // All tile layers use transparent=true + depthWrite=false + renderOrder=z so Three.js
-    // strictly renders z=2 -> bridgeZ -> targetZ in exact painter order with ZERO parent/child
-    // z-fighting or depth override at any altitude (17,500 km down to 120 m)!
     const material = new THREE.MeshBasicMaterial({
       map: cachedTex ?? null,
       color: 0xffffff,
@@ -837,6 +1274,9 @@ export class GlobeEngine {
       entry.material.dispose();
     }
     this.activeTiles.clear();
+    this.handleTexIdle.dispose();
+    this.handleTexHover.dispose();
+    this.handleTexActive.dispose();
     this.tileManager.dispose();
   }
 }

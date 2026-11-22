@@ -7,6 +7,32 @@ import { VRSpatialHUD } from './xr/VRSpatialHUD';
 import { DesktopHUD } from './ui/DesktopHUD';
 import { fetchServerConfig, setGoogleMapsPreferred } from './services/api';
 
+const STORAGE_AUTO_TILT_MAX = 'earthxr_auto_tilt_max_deg';
+const STORAGE_FLOOR_SHADOW = 'earthxr_floor_shadow';
+
+function loadSavedAutoTiltMax(): number {
+  try {
+    const raw = localStorage.getItem(STORAGE_AUTO_TILT_MAX);
+    if (raw !== null) {
+      const n = Number(raw);
+      if (Number.isFinite(n)) return THREE.MathUtils.clamp(Math.round(n), 0, 90);
+    }
+  } catch {
+    // ignore
+  }
+  return 45;
+}
+
+function loadSavedFloorShadow(): boolean {
+  try {
+    const raw = localStorage.getItem(STORAGE_FLOOR_SHADOW);
+    if (raw === '0') return false;
+  } catch {
+    // ignore
+  }
+  return true;
+}
+
 class EarthXRApp {
   private canvas: HTMLCanvasElement;
   private renderer: THREE.WebGLRenderer;
@@ -22,10 +48,13 @@ class EarthXRApp {
   private googleConfigured = false;
   private googleActive = false;
   private passthroughEnabled = false;
+  private globeMoveMode = false;
   private activeLocationLabel = 'Planeta Tierra';
+  private globeDragOffset = new THREE.Vector3();
 
   private isDragging = false;
   private isOrbitTiltDragging = false;
+  private isGlobePosDragging = false;
   private lastPointerPos = { x: 0, y: 0 };
   private mouseRaycaster = new THREE.Raycaster();
   private mouseNdc = new THREE.Vector2();
@@ -82,11 +111,15 @@ class EarthXRApp {
         this.globe.adjustTilt(delta);
         this.desktopHud.setTilt3DActive(true);
       },
+      onSetAutoTiltMax: (maxDeg) => this.applyAutoTiltMax(maxDeg),
       onResetNorth: () => this.globe.resetNorth(),
       onResetGlobe: () => {
         this.activeLocationLabel = 'Planeta Tierra';
         this.globe.resetView();
       },
+      onToggleGlobeMoveMode: () => this.toggleGlobeMoveMode(),
+      onResetGlobePosition: () => this.globe.resetGlobePosition(),
+      onToggleFloorShadow: () => this.applyFloorShadow(!this.globe.isFloorShadowEnabled()),
       onTogglePassthrough: () => this.togglePassthrough(),
       onSetLayer: (layer) => this.setLayer(layer),
       onToggleGoogleMaps: () => {
@@ -140,6 +173,29 @@ class EarthXRApp {
         this.vrHud.moveToWorldPosition(worldPos, cam);
       },
       onPanelDragEnd: () => this.vrHud.setGrabState(false, false),
+      onTestGlobeHandle: (ray) => {
+        const hit = this.globe.hitTestGlobeHandle(ray);
+        if (hit) this.globe.setGlobeHandleState(true, true);
+        return hit;
+      },
+      onTestGlobeBody: (ray) => {
+        const hit = this.globe.raycastGlobe(ray);
+        return hit ? { point: hit.worldPoint, distance: hit.distance } : null;
+      },
+      onGlobeDragStart: (grabWorldPoint) => {
+        this.globe.stopIdleSpin();
+        this.globe.setGlobeHandleState(true, true);
+        const curPos = this.globe.getGlobeWorldPosition();
+        this.globeDragOffset.copy(curPos).sub(grabWorldPoint);
+      },
+      onGlobeDragMove: (targetWorldPos) => {
+        const cam = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+        const desiredPos = targetWorldPos.clone().add(this.globeDragOffset);
+        this.globe.moveGlobeToWorldPosition(desiredPos, cam);
+      },
+      onGlobeDragEnd: () => {
+        this.globe.setGlobeHandleState(false, false);
+      },
     });
 
     this.desktopHud = new DesktopHUD(hudRoot, {
@@ -147,6 +203,9 @@ class EarthXRApp {
       onSetLayer: (layer) => this.setLayer(layer),
       onTogglePassthrough: () => this.togglePassthrough(),
       onToggleTilt3D: () => this.toggleTilt3D(),
+      onSetAutoTiltMax: (maxDeg) => this.applyAutoTiltMax(maxDeg),
+      onToggleFloorShadow: (enabled) => this.applyFloorShadow(enabled),
+      onResetGlobePosition: () => this.globe.resetGlobePosition(),
       onResetNorth: () => {
         this.globe.resetNorth();
         this.desktopHud.showToast('Orientación al Norte');
@@ -161,6 +220,8 @@ class EarthXRApp {
       onConfigUpdated: () => this.refreshServerConfig(),
     });
 
+    this.applyAutoTiltMax(loadSavedAutoTiltMax(), false);
+    this.applyFloorShadow(loadSavedFloorShadow(), false);
     this.applyPassthroughState(false);
     this.applyInitialUrlCoords();
     this.bindDesktopEvents();
@@ -169,9 +230,53 @@ class EarthXRApp {
     this.renderer.setAnimationLoop(() => this.tick());
   }
 
+  private applyAutoTiltMax(maxDeg: number, persist = true): void {
+    const clamped = THREE.MathUtils.clamp(Math.round(maxDeg), 0, 90);
+    this.globe.setAutoTiltMaxDeg(clamped);
+    this.desktopHud.setAutoTiltMaxUI(clamped);
+    this.desktopHud.setTilt3DActive(clamped > 0);
+    this.vrHud.updateState({
+      autoTiltMaxDeg: clamped,
+      tilt3DEnabled: clamped > 0,
+    });
+    if (persist) {
+      try {
+        localStorage.setItem(STORAGE_AUTO_TILT_MAX, String(clamped));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private applyFloorShadow(enabled: boolean, persist = true): void {
+    this.globe.setFloorShadowEnabled(enabled);
+    this.desktopHud.setFloorShadowUI(enabled);
+    this.vrHud.updateState({ floorShadowEnabled: enabled });
+    if (persist) {
+      try {
+        localStorage.setItem(STORAGE_FLOOR_SHADOW, enabled ? '1' : '0');
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private toggleGlobeMoveMode(): void {
+    this.globeMoveMode = !this.globeMoveMode;
+    this.xrControllers.setGlobeMoveMode(this.globeMoveMode);
+    this.vrHud.updateState({ globeMoveMode: this.globeMoveMode });
+  }
+
   private applyInitialUrlCoords(): void {
     try {
       const params = new URLSearchParams(window.location.search);
+      const tiltRaw = params.get('tilt');
+      if (tiltRaw !== null) {
+        const tiltVal = Number(tiltRaw);
+        if (Number.isFinite(tiltVal)) {
+          this.applyAutoTiltMax(tiltVal, false);
+        }
+      }
       const latRaw = params.get('lat');
       const lonRaw = params.get('lon');
       if (latRaw !== null && lonRaw !== null) {
@@ -182,9 +287,22 @@ class EarthXRApp {
         if (Number.isFinite(lat) && Number.isFinite(lon)) {
           const safeAlt = Number.isFinite(alt) && alt > 0 ? alt : 1.3;
           this.globe.setImmediatePosition(lat, lon, safeAlt);
+          if (tiltRaw !== null && Number.isFinite(Number(tiltRaw))) {
+            this.globe.setImmediateTilt(Number(tiltRaw));
+          }
           const name = params.get('name');
           if (name) this.activeLocationLabel = name;
         }
+      }
+      const gx = params.get('gx');
+      const gy = params.get('gy');
+      const gz = params.get('gz');
+      if (gx !== null || gy !== null || gz !== null) {
+        this.globe.nudgeGlobeWorldPosition(
+          Number(gx ?? 0) || 0,
+          Number(gy ?? 0) || 0,
+          Number(gz ?? 0) || 0
+        );
       }
     } catch {
       // ignore invalid query params
@@ -193,10 +311,18 @@ class EarthXRApp {
 
   private toggleTilt3D(): void {
     const active = this.globe.toggle3DTilt();
+    const maxDeg = this.globe.getAutoTiltMaxDeg();
+    this.desktopHud.setAutoTiltMaxUI(maxDeg);
     this.desktopHud.setTilt3DActive(active);
-    this.vrHud.updateState({ tilt3DEnabled: active });
+    this.vrHud.updateState({ tilt3DEnabled: active, autoTiltMaxDeg: maxDeg });
     if (!this.renderer.xr.isPresenting) {
-      this.desktopHud.showToast(active ? 'Inclinación 3D activada' : 'Vista vertical 2D');
+      this.desktopHud.showToast(
+        active
+          ? maxDeg >= 85
+            ? 'Inclinación horizontal (90° paralelo al piso) activada'
+            : `Inclinación 3D activada (máx ${maxDeg}°)`
+          : 'Vista vertical 2D'
+      );
     }
   }
 
@@ -252,6 +378,7 @@ class EarthXRApp {
       this.desktopHud.setXRSupport(this.arSupported, this.vrSupported, true);
       this.desktopHud.setInXRSession(true);
       this.vrHud.setVisible(true);
+      this.globe.setGlobeHandleVisible(true);
     });
 
     this.renderer.xr.addEventListener('sessionend', () => {
@@ -259,6 +386,10 @@ class EarthXRApp {
       this.desktopHud.setXRSupport(this.arSupported, this.vrSupported, false);
       this.desktopHud.setInXRSession(false);
       this.vrHud.setVisible(false);
+      this.globe.setGlobeHandleVisible(false);
+      this.globeMoveMode = false;
+      this.xrControllers.setGlobeMoveMode(false);
+      this.vrHud.updateState({ globeMoveMode: false });
     });
   }
 
@@ -302,7 +433,7 @@ class EarthXRApp {
   private visitSearchResult(res: GeocodeResult): void {
     this.activeLocationLabel = res.name;
     this.desktopHud.showToast(`Volando hacia ${res.name}...`);
-    this.globe.flyTo(res.lat, res.lon, 1.5, 1.8);
+    this.globe.flyTo(res.lat, res.lon, 1.0, 1.8);
   }
 
   private handleSelectRay(raycaster: THREE.Raycaster): void {
@@ -311,7 +442,7 @@ class EarthXRApp {
     const globeHit = this.globe.raycastGlobe(raycaster);
     if (globeHit) {
       const curAlt = this.globe.getState().altitudeKm;
-      const nextAlt = curAlt > 1500 ? 140 : curAlt > 35 ? 2.5 : Math.max(0.25, curAlt * 0.45);
+      const nextAlt = curAlt > 1500 ? 140 : curAlt > 35 ? 2.0 : Math.max(0.25, curAlt * 0.45);
       this.activeLocationLabel = 'Ubicación seleccionada';
       this.globe.flyTo(globeHit.lat, globeHit.lon, nextAlt, 1.2);
     }
@@ -327,6 +458,15 @@ class EarthXRApp {
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
     this.canvas.addEventListener('pointerdown', (e) => {
+      // Middle button or Alt + Left drag: move the 3D globe freely in space!
+      if (e.button === 1 || (e.button === 0 && e.altKey)) {
+        e.preventDefault();
+        this.isGlobePosDragging = true;
+        this.lastPointerPos = { x: e.clientX, y: e.clientY };
+        this.canvas.setPointerCapture(e.pointerId);
+        this.globe.stopIdleSpin();
+        return;
+      }
       if (e.button === 2 || (e.button === 0 && e.shiftKey)) {
         this.isOrbitTiltDragging = true;
         this.lastPointerPos = { x: e.clientX, y: e.clientY };
@@ -344,12 +484,20 @@ class EarthXRApp {
     this.canvas.addEventListener('pointermove', (e) => {
       this.updateMouseRay(e);
 
+      if (this.isGlobePosDragging) {
+        const dx = e.clientX - this.lastPointerPos.x;
+        const dy = e.clientY - this.lastPointerPos.y;
+        this.lastPointerPos = { x: e.clientX, y: e.clientY };
+        this.globe.nudgeGlobeWorldPosition(dx * 0.0045, -dy * 0.0045, 0);
+        return;
+      }
+
       if (this.isOrbitTiltDragging) {
         const dx = e.clientX - this.lastPointerPos.x;
         const dy = e.clientY - this.lastPointerPos.y;
         this.lastPointerPos = { x: e.clientX, y: e.clientY };
         this.globe.rotateHeading(-dx * 0.28);
-        this.globe.adjustTilt(-dy * 0.22);
+        this.globe.adjustTilt(-dy * 0.28);
         this.desktopHud.setTilt3DActive(true);
         return;
       }
@@ -368,6 +516,7 @@ class EarthXRApp {
     const endDrag = (e: PointerEvent) => {
       this.isDragging = false;
       this.isOrbitTiltDragging = false;
+      this.isGlobePosDragging = false;
       try {
         this.canvas.releasePointerCapture(e.pointerId);
       } catch {
@@ -383,7 +532,7 @@ class EarthXRApp {
       const hit = this.globe.raycastGlobe(this.mouseRaycaster);
       if (!hit) return;
       const curAlt = this.globe.getState().altitudeKm;
-      const targetAlt = curAlt > 800 ? 45 : curAlt > 8 ? 1.4 : 0.3;
+      const targetAlt = curAlt > 800 ? 45 : curAlt > 8 ? 1.0 : 0.3;
       this.activeLocationLabel = 'Ubicación seleccionada';
       this.globe.flyTo(hit.lat, hit.lon, targetAlt, 1.15);
     });
@@ -410,6 +559,7 @@ class EarthXRApp {
   private updateXRPointerHovers(): void {
     if (!this.renderer.xr.isPresenting) return;
     let hudHitAny = false;
+    let globeHandleHitAny = false;
 
     for (let i = 0; i < 2; i++) {
       const ray = this.xrControllers.getRaycasterForSlot(i);
@@ -422,11 +572,20 @@ class EarthXRApp {
         continue;
       }
 
+      const handleHit = this.globe.hitTestGlobeHandle(ray);
+      if (handleHit) {
+        globeHandleHitAny = true;
+        this.globe.setGlobeHandleHover(true);
+        this.xrControllers.setSlotHitFeedback(i, handleHit.point, true);
+        continue;
+      }
+
       const gh = this.globe.raycastGlobe(ray);
-      this.xrControllers.setSlotHitFeedback(i, gh?.worldPoint ?? null, false);
+      this.xrControllers.setSlotHitFeedback(i, gh?.worldPoint ?? null, this.globeMoveMode);
     }
 
     if (!hudHitAny) this.vrHud.clearHover();
+    if (!globeHandleHitAny) this.globe.setGlobeHandleHover(false);
   }
 
   private tick(): void {
@@ -437,7 +596,8 @@ class EarthXRApp {
     this.xrControllers.update(dt);
     this.updateXRPointerHovers();
 
-    this.globe.update(dt, nowSec);
+    const activeCam = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+    this.globe.update(dt, nowSec, activeCam);
     const st = this.globe.getState();
 
     this.desktopHud.updateTelemetry(
@@ -454,6 +614,8 @@ class EarthXRApp {
       headingDeg: st.headingDeg,
       tiltDeg: st.tiltDeg,
       tilt3DEnabled: this.globe.isTilt3DEnabled(),
+      autoTiltMaxDeg: this.globe.getAutoTiltMaxDeg(),
+      floorShadowEnabled: this.globe.isFloorShadowEnabled(),
       locationLabel: this.activeLocationLabel,
     });
 
